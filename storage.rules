@@ -1,0 +1,31 @@
+rules_version = '2';
+
+// Firebase Storage Security Rules
+service firebase.storage {
+  match /b/{bucket}/o {
+    
+    // Slips storage
+    match /slips/{userId}/{filename} {
+      // Allow authenticated users to upload their own slips
+      allow write: if request.auth != null && request.auth.uid == userId;
+      
+      // Allow anyone to read slip images
+      allow read: if true;
+    }
+    
+    // Avatars storage
+    match /avatars/{userId}.jpg {
+      // Allow authenticated users to upload their own avatar
+      allow write: if request.auth != null && request.auth.uid == userId;
+      
+      // Allow anyone to read avatars
+      allow read: if true;
+    }
+    
+    // Default: deny all other access
+    match /{allPaths=**} {
+      allow read, write: if false;
+    }
+  }
+}
+

@@ -1,0 +1,8 @@
+🚀 OCR Server running on:
+   - Local:   http://localhost:3001
+   - Network: http://192.168.1.152:3001
+📸 Ready to process images from physical devices!
+
+💡 Usage:
+   curl -X POST -F "image=@slip.jpg" http://192.168.1.152:3001/ocr
+
