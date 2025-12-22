@@ -54,7 +54,7 @@ class DeepLinkService {
    */
   private getWebURL(platform: BettingPlatform, code: string): string {
     const webUrls: Record<BettingPlatform, string> = {
-      SportyBet: `https://www.sportybet.com/gh/share/code/${code}`,
+      SportyBet: `http://www.sportybet.com/gh/?shareCode=${code}`,
       Bet9ja: `https://web.bet9ja.com/share/${code}`,
       '1xBet': `https://1xbet.com/en/line/football`,
       Betway: `https://betway.com.gh/`,

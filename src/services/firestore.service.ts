@@ -7,6 +7,7 @@ import {
   addDoc,
   updateDoc,
   setDoc,
+  deleteDoc,
   query,
   where,
   orderBy,
@@ -14,7 +15,9 @@ import {
   serverTimestamp,
   increment,
   arrayUnion,
-  Timestamp
+  Timestamp,
+  onSnapshot,
+  Unsubscribe
 } from 'firebase/firestore';
 
 export interface Creator {
@@ -25,6 +28,9 @@ export interface Creator {
   winRate: number;
   totalSlips: number;
   wins?: number; // Track total wins for accurate win rate
+  accuracy?: number; // Weighted performance metric (0-100)
+  roi?: number; // Return on investment - average earnings per premium slip (GH₵)
+  avgEarningsPerSlip?: number; // Average earnings per premium slip (GH₵) - same as roi but clearer name
   verifiedStatus: 'verified' | 'unverified';
   bio?: string;
   description?: string;
@@ -39,7 +45,8 @@ export interface Slip {
   title: string;
   description: string;
   odds: number;
-  status: 'pending' | 'won' | 'lost';
+  status: 'pending' | 'active' | 'won' | 'lost';
+  extractionStatus?: 'extracting' | 'completed' | 'failed'; // Track extraction state
   matchDate: Date;
   sport: string;
   league: string;
@@ -70,6 +77,18 @@ export interface Slip {
   isPremium?: boolean;
   price?: number; // Price in GHS
   purchasedBy?: string[]; // User IDs who purchased
+  // Extracted matches from booking code
+  matches?: Array<{
+    homeTeam: string;
+    awayTeam: string;
+    prediction: string;
+    odds: number;
+    market: string;
+    matchDate?: Date; // Individual match date/time
+    league?: string;
+  }>;
+  // Expiration: slip expires 10 minutes before first match
+  expiresAt?: Date;
 }
 
 export interface Subscription {
@@ -182,12 +201,31 @@ export class FirestoreService {
       const q = query(slipsRef, orderBy('createdAt', 'desc'), limit(limitCount));
       const snapshot = await getDocs(q);
 
-      return snapshot.docs.map(docSnap => ({
-        id: docSnap.id,
-        ...docSnap.data(),
-        createdAt: docSnap.data().createdAt?.toDate() || new Date(),
-        matchDate: docSnap.data().matchDate?.toDate() || new Date(),
-      })) as Slip[];
+      const now = new Date();
+      return snapshot.docs
+        .map(docSnap => {
+          const data = docSnap.data();
+          const slip: Slip = {
+            id: docSnap.id,
+            ...data,
+            createdAt: data.createdAt?.toDate() || new Date(),
+            matchDate: data.matchDate?.toDate() || new Date(),
+            expiresAt: data.expiresAt?.toDate(),
+            // Convert match dates in matches array
+            matches: data.matches?.map((m: any) => ({
+              ...m,
+              matchDate: m.matchDate?.toDate ? m.matchDate.toDate() : (m.matchDate ? new Date(m.matchDate) : undefined),
+            })),
+          } as Slip;
+          
+          // Filter out expired slips (10 minutes before first match)
+          if (slip.expiresAt && slip.expiresAt <= now) {
+            return null;
+          }
+          
+          return slip;
+        })
+        .filter((slip): slip is Slip => slip !== null);
     } catch (error) {
       console.error('Error fetching slips:', error);
       return [];
@@ -204,12 +242,22 @@ export class FirestoreService {
       );
       const snapshot = await getDocs(q);
 
-      return snapshot.docs.map(docSnap => ({
-        id: docSnap.id,
-        ...docSnap.data(),
-        createdAt: docSnap.data().createdAt?.toDate() || new Date(),
-        matchDate: docSnap.data().matchDate?.toDate() || new Date(),
-      })) as Slip[];
+      // Don't filter expired slips - creators should see their history
+      return snapshot.docs.map(docSnap => {
+        const data = docSnap.data();
+        return {
+          id: docSnap.id,
+          ...data,
+          createdAt: data.createdAt?.toDate() || new Date(),
+          matchDate: data.matchDate?.toDate() || new Date(),
+          expiresAt: data.expiresAt?.toDate(),
+          // Convert match dates in matches array - ensure it's an array
+          matches: Array.isArray(data.matches) ? data.matches.map((m: any) => ({
+            ...m,
+            matchDate: m.matchDate?.toDate ? m.matchDate.toDate() : (m.matchDate ? new Date(m.matchDate) : undefined),
+          })) : undefined,
+        } as Slip;
+      });
     } catch (error) {
       console.error('Error fetching creator slips:', error);
       return [];
@@ -223,18 +271,167 @@ export class FirestoreService {
 
       if (docSnap.exists()) {
         const data = docSnap.data();
-        return {
+        const matches = Array.isArray(data.matches) ? data.matches.map((m: any) => ({
+          ...m,
+          matchDate: m.matchDate?.toDate ? m.matchDate.toDate() : (m.matchDate ? new Date(m.matchDate) : undefined),
+        })) : undefined;
+        
+        console.log(`📖 Reading slip ${docSnap.id}:`, {
+          hasMatches: !!data.matches,
+          matchesLength: Array.isArray(data.matches) ? data.matches.length : 0,
+          matchesType: typeof data.matches,
+          matches: matches,
+        });
+        
+        const slip: Slip = {
           id: docSnap.id,
           ...data,
           createdAt: data.createdAt?.toDate() || new Date(),
           matchDate: data.matchDate?.toDate() || new Date(),
+          expiresAt: data.expiresAt?.toDate(),
+          // Convert match dates in matches array - ensure it's an array
+          matches,
         } as Slip;
+        
+        // Check if slip has expired
+        if (slip.expiresAt && slip.expiresAt <= new Date()) {
+          // Still return the slip but mark it as expired (client can handle display)
+          return slip;
+        }
+        
+        return slip;
       }
       return null;
     } catch (error) {
       console.error('Error fetching slip:', error);
       return null;
     }
+  }
+
+  /**
+   * Subscribe to real-time updates for slips
+   * Returns unsubscribe function
+   */
+  static subscribeToSlips(
+    callback: (slips: Slip[]) => void,
+    limitCount: number = 20
+  ): Unsubscribe {
+    const slipsRef = collection(firebaseFirestore, Collections.SLIPS);
+    const q = query(slipsRef, orderBy('createdAt', 'desc'), limit(limitCount));
+    
+      return onSnapshot(q, (snapshot) => {
+      const now = new Date();
+      const slips = snapshot.docs
+        .map(docSnap => {
+          const data = docSnap.data();
+          const slip: Slip = {
+            id: docSnap.id,
+            ...data,
+            createdAt: data.createdAt?.toDate() || new Date(),
+            matchDate: data.matchDate?.toDate() || new Date(),
+            expiresAt: data.expiresAt?.toDate(),
+            // Convert match dates in matches array - ensure it's an array
+            matches: Array.isArray(data.matches) ? data.matches.map((m: any) => ({
+              ...m,
+              matchDate: m.matchDate?.toDate ? m.matchDate.toDate() : (m.matchDate ? new Date(m.matchDate) : undefined),
+            })) : undefined,
+          } as Slip;
+          
+          // Filter out expired slips (10 minutes before first match)
+          if (slip.expiresAt && slip.expiresAt <= now) {
+            return null;
+          }
+          
+          // Only show active slips (extraction completed)
+          // Pending slips (still extracting) should not appear in feed
+          if (slip.status === 'pending' && slip.extractionStatus !== 'completed') {
+            return null;
+          }
+          
+          return slip;
+        })
+        .filter((slip): slip is Slip => slip !== null);
+      
+      callback(slips);
+    }, (error) => {
+      console.error('Error in slips subscription:', error);
+      callback([]);
+    });
+  }
+
+  /**
+   * Subscribe to real-time updates for a single slip
+   * Returns unsubscribe function
+   */
+  static subscribeToSlip(
+    slipId: string,
+    callback: (slip: Slip | null) => void
+  ): Unsubscribe {
+    const slipRef = doc(firebaseFirestore, Collections.SLIPS, slipId);
+    
+    return onSnapshot(slipRef, (docSnap) => {
+      if (docSnap.exists()) {
+        const data = docSnap.data();
+        const slip: Slip = {
+          id: docSnap.id,
+          ...data,
+          createdAt: data.createdAt?.toDate() || new Date(),
+          matchDate: data.matchDate?.toDate() || new Date(),
+          expiresAt: data.expiresAt?.toDate(),
+          // Convert match dates in matches array - ensure it's an array
+          matches: Array.isArray(data.matches) ? data.matches.map((m: any) => ({
+            ...m,
+            matchDate: m.matchDate?.toDate ? m.matchDate.toDate() : (m.matchDate ? new Date(m.matchDate) : undefined),
+          })) : undefined,
+        } as Slip;
+        callback(slip);
+      } else {
+        callback(null); // Slip was deleted
+      }
+    }, (error) => {
+      console.error('Error in slip subscription:', error);
+      callback(null);
+    });
+  }
+
+  /**
+   * Subscribe to real-time updates for creator's slips
+   * Returns unsubscribe function
+   */
+  static subscribeToCreatorSlips(
+    creatorId: string,
+    callback: (slips: Slip[]) => void
+  ): Unsubscribe {
+    const slipsRef = collection(firebaseFirestore, Collections.SLIPS);
+    const q = query(
+      slipsRef,
+      where('creatorId', '==', creatorId),
+      orderBy('createdAt', 'desc')
+    );
+    
+    return onSnapshot(q, (snapshot) => {
+      const slips = snapshot.docs.map(docSnap => {
+        const data = docSnap.data();
+        const slip: Slip = {
+          id: docSnap.id,
+          ...data,
+          createdAt: data.createdAt?.toDate() || new Date(),
+          matchDate: data.matchDate?.toDate() || new Date(),
+          expiresAt: data.expiresAt?.toDate(),
+          // Convert match dates in matches array - ensure it's an array
+          matches: Array.isArray(data.matches) ? data.matches.map((m: any) => ({
+            ...m,
+            matchDate: m.matchDate?.toDate ? m.matchDate.toDate() : (m.matchDate ? new Date(m.matchDate) : undefined),
+          })) : undefined,
+        } as Slip;
+        return slip;
+      });
+      
+      callback(slips);
+    }, (error) => {
+      console.error('Error in creator slips subscription:', error);
+      callback([]);
+    });
   }
 
   static async createSlip(slip: Omit<Slip, 'id' | 'createdAt' | 'likes' | 'comments'>): Promise<string> {
@@ -246,13 +443,48 @@ export class FirestoreService {
         Object.entries(slip).filter(([_, value]) => value !== undefined)
       );
       
-      const docRef = await addDoc(slipsRef, {
+      // Build slip data object, only including defined values
+      const slipData: any = {
         ...cleanSlip,
         matchDate: Timestamp.fromDate(slip.matchDate),
         createdAt: serverTimestamp(),
         likes: 0,
         comments: 0,
-      });
+      };
+      
+      // Only add expiresAt if it exists (don't include undefined)
+      if (slip.expiresAt) {
+        slipData.expiresAt = Timestamp.fromDate(slip.expiresAt);
+      }
+      
+      // Convert match dates in matches array to Timestamps (remove undefined values)
+      if (slip.matches && slip.matches.length > 0) {
+        console.log(`📝 Saving slip with ${slip.matches.length} matches`);
+        slipData.matches = slip.matches.map(m => {
+          const matchData: any = {
+            homeTeam: m.homeTeam,
+            awayTeam: m.awayTeam,
+            prediction: m.prediction,
+            odds: m.odds,
+            market: m.market,
+          };
+          // Only add matchDate if it exists
+          if (m.matchDate) {
+            matchData.matchDate = Timestamp.fromDate(m.matchDate);
+          }
+          // Only add league if it exists
+          if (m.league) {
+            matchData.league = m.league;
+          }
+          return matchData;
+        });
+        console.log(`✅ Matches saved:`, JSON.stringify(slipData.matches, null, 2));
+      } else {
+        console.warn(`⚠️ No matches to save for slip`);
+      }
+      
+      const docRef = await addDoc(slipsRef, slipData);
+      console.log(`✅ Slip created with ID: ${docRef.id}`);
       return docRef.id;
     } catch (error) {
       console.error('Error creating slip:', error);
@@ -274,22 +506,132 @@ export class FirestoreService {
     }
   }
 
-  static async updateCreatorStats(creatorId: string): Promise<void> {
+  /**
+   * Delete a slip (only creator can delete their own slips)
+   */
+  static async deleteSlip(slipId: string, creatorId: string): Promise<void> {
     try {
-      // Get all slips by creator
+      // Verify the slip belongs to the creator
+      const slipData = await this.getSlip(slipId);
+      if (!slipData) {
+        throw new Error('Slip not found');
+      }
+      if (slipData.creatorId !== creatorId) {
+        throw new Error('You can only delete your own slips');
+      }
+
+      const docRef = doc(firebaseFirestore, Collections.SLIPS, slipId);
+      await deleteDoc(docRef);
+      
+      // Update creator stats after deletion
+      await this.updateCreatorStats(creatorId);
+    } catch (error) {
+      console.error('Error deleting slip:', error);
+      throw new Error('Failed to delete slip');
+    }
+  }
+
+  /**
+   * Calculate comprehensive creator statistics
+   * Returns: { winRate, accuracy, roi, avgEarningsPerSlip, totalSlips, wins, losses }
+   */
+  static async calculateCreatorStats(creatorId: string): Promise<{
+    winRate: number;
+    accuracy: number;
+    roi: number;
+    avgEarningsPerSlip: number;
+    totalSlips: number;
+    wins: number;
+    losses: number;
+  }> {
+    try {
+      // 1. Get all verified slips for win rate and accuracy
       const slipsRef = collection(firebaseFirestore, Collections.SLIPS);
-      const q = query(
+      const verifiedSlipsQuery = query(
         slipsRef,
         where('creatorId', '==', creatorId),
         where('resultChecked', '==', true)
       );
+      const verifiedSnapshot = await getDocs(verifiedSlipsQuery);
+      const verifiedSlips = verifiedSnapshot.docs.map(doc => doc.data());
       
-      const snapshot = await getDocs(q);
-      const slips = snapshot.docs.map(doc => doc.data());
-      
-      const totalSlips = slips.length;
-      const wins = slips.filter(slip => slip.status === 'won').length;
+      // Calculate Win Rate
+      const totalSlips = verifiedSlips.length;
+      const wins = verifiedSlips.filter(slip => slip.status === 'won').length;
+      const losses = verifiedSlips.filter(slip => slip.status === 'lost').length;
       const winRate = totalSlips > 0 ? (wins / totalSlips) * 100 : 0;
+      
+      // Calculate Accuracy (weighted by odds)
+      const wonSlips = verifiedSlips.filter(slip => slip.status === 'won');
+      const weightedWins = wonSlips.reduce((sum, slip) => {
+        const odds = slip.odds || 1.0; // Default to 1.0 if missing
+        return sum + Math.max(odds, 1.0); // Ensure minimum 1.0
+      }, 0);
+      
+      const weightedTotal = verifiedSlips.reduce((sum, slip) => {
+        const odds = slip.odds || 1.0;
+        return sum + Math.max(odds, 1.0);
+      }, 0);
+      
+      const accuracy = weightedTotal > 0 ? (weightedWins / weightedTotal) * 100 : 0;
+      
+      // 2. Get earnings for ROI calculation
+      const transactionsRef = collection(firebaseFirestore, Collections.TRANSACTIONS);
+      const earningsQuery = query(
+        transactionsRef,
+        where('userId', '==', creatorId),
+        where('type', '==', 'earning'),
+        where('status', '==', 'completed')
+      );
+      const earningsSnapshot = await getDocs(earningsQuery);
+      const totalEarnings = earningsSnapshot.docs.reduce((sum, doc) => {
+        return sum + (doc.data().amount || 0);
+      }, 0);
+      
+      // Calculate platform fees (10%)
+      const platformFees = totalEarnings * 0.10;
+      const netEarnings = totalEarnings - platformFees;
+      
+      // 3. Get premium slips count
+      const premiumSlipsQuery = query(
+        slipsRef,
+        where('creatorId', '==', creatorId),
+        where('isPremium', '==', true)
+      );
+      const premiumSnapshot = await getDocs(premiumSlipsQuery);
+      const totalPremiumSlips = premiumSnapshot.docs.length;
+      
+      // Calculate ROI (average earnings per premium slip)
+      const avgEarningsPerSlip = totalPremiumSlips > 0 ? netEarnings / totalPremiumSlips : 0;
+      const roi = avgEarningsPerSlip; // Same value, roi is just an alias for clarity
+      
+      return {
+        winRate: Math.round(winRate * 10) / 10, // Round to 1 decimal
+        accuracy: Math.round(accuracy * 10) / 10, // Round to 1 decimal
+        roi: Math.round(avgEarningsPerSlip * 100) / 100, // Round to 2 decimals for currency
+        avgEarningsPerSlip: Math.round(avgEarningsPerSlip * 100) / 100,
+        totalSlips,
+        wins,
+        losses,
+      };
+    } catch (error) {
+      console.error('Error calculating creator stats:', error);
+      // Return zeros on error
+      return {
+        winRate: 0,
+        accuracy: 0,
+        roi: 0,
+        avgEarningsPerSlip: 0,
+        totalSlips: 0,
+        wins: 0,
+        losses: 0,
+      };
+    }
+  }
+
+  static async updateCreatorStats(creatorId: string): Promise<void> {
+    try {
+      const stats = await this.calculateCreatorStats(creatorId);
 
       // Update creator profile
       const creatorRef = doc(firebaseFirestore, Collections.CREATORS, creatorId);
@@ -297,9 +639,19 @@ export class FirestoreService {
       
       if (creatorSnap.exists()) {
         await updateDoc(creatorRef, {
-          totalSlips,
-          wins,
-          winRate: Math.round(winRate * 10) / 10, // Round to 1 decimal
+          totalSlips: stats.totalSlips,
+          wins: stats.wins,
+          winRate: stats.winRate,
+          accuracy: stats.accuracy,
+          roi: stats.roi,
+          avgEarningsPerSlip: stats.avgEarningsPerSlip,
+        });
+        
+        console.log(`Creator ${creatorId} stats updated:`, {
+          winRate: `${stats.winRate}%`,
+          accuracy: `${stats.accuracy}%`,
+          roi: `GH₵ ${stats.roi.toFixed(2)}`,
+          totalSlips: stats.totalSlips,
         });
       }
     } catch (error) {

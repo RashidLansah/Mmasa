@@ -28,21 +28,23 @@ export const SlipDetailsScreen: React.FC<SlipDetailsScreenProps> = ({
   const [slip, setSlip] = useState<Slip | null>(null);
   const [loading, setLoading] = useState(true);
   const [purchasing, setPurchasing] = useState(false);
+  const [deleting, setDeleting] = useState(false);
   const { popup } = usePaystack();
 
   useEffect(() => {
-    const fetchSlipDetails = async () => {
-      try {
-        const slipData = await FirestoreService.getSlip(slipId);
+    // Set up real-time listener for slip updates
+    const unsubscribe = FirestoreService.subscribeToSlip(slipId, (slipData) => {
+      if (slipData) {
         setSlip(slipData);
-      } catch (error) {
-        console.error('Error fetching slip:', error);
-      } finally {
-        setLoading(false);
+      } else {
+        // Slip was deleted
+        setSlip(null);
       }
-    };
-
-    fetchSlipDetails();
+      setLoading(false);
+    });
+    
+    // Cleanup listener on unmount
+    return () => unsubscribe();
   }, [slipId]);
 
   const handlePurchase = () => {
@@ -127,6 +129,15 @@ export const SlipDetailsScreen: React.FC<SlipDetailsScreenProps> = ({
         reference,
       });
 
+      // Update creator stats (ROI will be recalculated)
+      try {
+        await FirestoreService.updateCreatorStats(slip.creatorId);
+        console.log('✅ Creator stats updated after purchase');
+      } catch (error) {
+        console.error('⚠️ Failed to update creator stats:', error);
+        // Don't fail the purchase if stats update fails
+      }
+
       // Refresh slip data
       const updatedSlip = await FirestoreService.getSlip(slip.id);
       setSlip(updatedSlip);
@@ -154,7 +165,43 @@ export const SlipDetailsScreen: React.FC<SlipDetailsScreenProps> = ({
     Alert.alert('Payment Failed', 'An error occurred during payment. Please try again.');
   };
 
+  /**
+   * Handle slip deletion (only for creator)
+   */
+  const handleDeleteSlip = () => {
+    if (!slip || !user) return;
+
+    Alert.alert(
+      'Delete Slip',
+      'Are you sure you want to delete this slip? This action cannot be undone.',
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Delete',
+          style: 'destructive',
+          onPress: async () => {
+            setDeleting(true);
+            try {
+              await FirestoreService.deleteSlip(slip.id, user.uid);
+              Alert.alert(
+                'Deleted',
+                'Slip has been deleted successfully',
+                [{ text: 'OK', onPress: () => navigation.goBack() }]
+              );
+            } catch (error: any) {
+              console.error('Error deleting slip:', error);
+              Alert.alert('Error', error.message || 'Failed to delete slip');
+            } finally {
+              setDeleting(false);
+            }
+          },
+        },
+      ]
+    );
+  };
+
   const hasAccess = !slip?.isPremium || slip?.creatorId === user?.uid || slip?.purchasedBy?.includes(user?.uid || '');
+  const isCreator = slip?.creatorId === user?.uid;
 
   if (loading) {
     return (
@@ -327,6 +374,93 @@ export const SlipDetailsScreen: React.FC<SlipDetailsScreenProps> = ({
             </Card>
           )}
 
+          {/* Matches List - Show if available */}
+          {hasAccess && (
+            <>
+              {/* New format: Multiple matches from matches array */}
+              {slip.matches && slip.matches.length > 0 && (
+                <Card style={styles.matchesCard}>
+                  <AppText variant="h3" style={styles.matchesTitle}>
+                    Selections ({slip.matches.length})
+                  </AppText>
+                  {slip.matches.map((match, index) => {
+                    // Format prediction display
+                    const predictionLabel = match.prediction === 'home' ? 'Home' : 
+                                          match.prediction === 'away' ? 'Away' : 
+                                          match.prediction === 'draw' ? 'Draw' :
+                                          match.prediction.charAt(0).toUpperCase() + match.prediction.slice(1);
+                    
+                    // Format market/bet type (e.g., 'h2h' -> '1X2', 'totals' -> 'Over/Under')
+                    const marketLabel = match.market === 'h2h' ? '1X2' :
+                                      match.market === 'totals' ? 'Over/Under' :
+                                      match.market === 'btts' ? 'BTTS' :
+                                      match.market === 'spreads' ? 'Handicap' :
+                                      match.market === 'double_chance' ? 'Double Chance' :
+                                      match.market.toUpperCase();
+                    
+                    return (
+                      <View key={index} style={styles.matchCard}>
+                        {index > 0 && <View style={styles.matchDivider} />}
+                        <View style={styles.matchContent}>
+                          <View style={styles.matchLeft}>
+                            <View style={styles.predictionRow}>
+                              <Ionicons name="football" size={16} color={theme.colors.text.primary} />
+                              <AppText variant="bodySmall" style={styles.predictionLabel}>
+                                {predictionLabel}
+                              </AppText>
+                            </View>
+                            <AppText variant="bodySmall" style={styles.matchTeams}>
+                              {match.homeTeam} vs {match.awayTeam}
+                            </AppText>
+                            <AppText variant="caption" color={theme.colors.text.secondary} style={styles.marketLabel}>
+                              {marketLabel}
+                            </AppText>
+                          </View>
+                          <AppText variant="bodySmall" color={theme.colors.accent.primary} style={styles.matchOdds}>
+                            {match.odds.toFixed(2)}
+                          </AppText>
+                        </View>
+                      </View>
+                    );
+                  })}
+                </Card>
+              )}
+              
+              {/* Old format: Single match from homeTeam/awayTeam (backward compatibility) */}
+              {(!slip.matches || slip.matches.length === 0) && slip.homeTeam && slip.awayTeam && (
+                <Card style={styles.matchesCard}>
+                  <AppText variant="h3" style={styles.matchesTitle}>
+                    Bet Details
+                  </AppText>
+                  <View style={styles.matchCard}>
+                    <View style={styles.matchHeader}>
+                      <AppText variant="bodySmall" style={styles.matchTeams}>
+                        {slip.homeTeam} vs {slip.awayTeam}
+                      </AppText>
+                      {slip.odds && (
+                        <AppText variant="bodySmall" color={theme.colors.accent.primary} style={styles.matchOdds}>
+                          {slip.odds.toFixed(2)}
+                        </AppText>
+                      )}
+                    </View>
+                    {slip.prediction && (
+                      <View style={styles.matchPrediction}>
+                        <AppText variant="caption" color={theme.colors.text.secondary}>
+                          Prediction:
+                        </AppText>
+                        <AppText variant="bodySmall" color={theme.colors.accent.primary} style={styles.predictionText}>
+                          {slip.prediction === 'home' ? slip.homeTeam : 
+                           slip.prediction === 'away' ? slip.awayTeam : 
+                           'Draw'}
+                        </AppText>
+                      </View>
+                    )}
+                  </View>
+                </Card>
+              )}
+            </>
+          )}
+
           {/* Description - Always visible for basic info */}
           <View style={styles.detailsSection}>
             <AppText variant="body" color={theme.colors.text.secondary} style={styles.description}>
@@ -344,28 +478,16 @@ export const SlipDetailsScreen: React.FC<SlipDetailsScreenProps> = ({
             </View>
           )}
 
-          {/* Stats - Hide stake/potential win for locked premium slips */}
+          {/* Stats - Show only match date and total odds */}
           <View style={styles.statsRow}>
-            {hasAccess && slip.stake && (
-              <View style={styles.statItem}>
-                <AppText variant="caption" color={theme.colors.text.secondary}>
-                  Stake
-                </AppText>
-                <AppText variant="bodySmall" style={styles.statValue}>
-                  GH₵{slip.stake}
-                </AppText>
-              </View>
-            )}
-            {hasAccess && slip.potentialWin && (
-              <View style={styles.statItem}>
-                <AppText variant="caption" color={theme.colors.text.secondary}>
-                  Potential Win
-                </AppText>
-                <AppText variant="bodySmall" style={styles.winValue}>
-                  GH₵{slip.potentialWin}
-                </AppText>
-              </View>
-            )}
+            <View style={styles.statItem}>
+              <AppText variant="caption" color={theme.colors.text.secondary}>
+                Total Odds
+              </AppText>
+              <AppText variant="bodySmall" style={styles.statValue}>
+                {slip.odds?.toFixed(2) || '0.00'}
+              </AppText>
+            </View>
             <View style={styles.statItem}>
               <AppText variant="caption" color={theme.colors.text.secondary}>
                 Match Date
@@ -387,7 +509,39 @@ export const SlipDetailsScreen: React.FC<SlipDetailsScreenProps> = ({
           <AppText variant="caption" color={theme.colors.text.secondary} style={styles.date}>
             Published {new Date(slip.createdAt).toLocaleDateString()}
           </AppText>
+          
+          {/* Expiration notice */}
+          {slip.expiresAt && new Date(slip.expiresAt) > new Date() && (
+            <View style={styles.expirationNotice}>
+              <Ionicons name="time-outline" size={16} color={theme.colors.status.warning} />
+              <AppText variant="caption" color={theme.colors.status.warning}>
+                Expires {new Date(slip.expiresAt).toLocaleString()}
+              </AppText>
+            </View>
+          )}
+          
+          {slip.expiresAt && new Date(slip.expiresAt) <= new Date() && (
+            <View style={styles.expiredNotice}>
+              <Ionicons name="close-circle" size={16} color={theme.colors.status.error} />
+              <AppText variant="caption" color={theme.colors.status.error}>
+                This slip has expired
+              </AppText>
+            </View>
+          )}
         </Card>
+
+        {/* Action buttons - Delete for creator, Purchase for others */}
+        {isCreator && (
+          <View style={styles.actionsContainer}>
+            <AppButton
+              title={deleting ? 'Deleting...' : 'Delete Slip'}
+              onPress={handleDeleteSlip}
+              variant="secondary"
+              disabled={deleting}
+              style={[styles.actionButton, styles.deleteButton]}
+            />
+          </View>
+        )}
 
       </ScrollView>
 
@@ -469,11 +623,82 @@ const styles = StyleSheet.create({
   date: {
     marginTop: theme.spacing.md,
   },
+  matchesCard: {
+    margin: theme.spacing.lg,
+    marginTop: 0,
+  },
+  matchesTitle: {
+    marginBottom: theme.spacing.md,
+    fontWeight: '600',
+  },
+  matchCard: {
+    marginBottom: 0,
+  },
+  matchDivider: {
+    height: 1,
+    backgroundColor: theme.colors.border.subtle,
+    marginVertical: theme.spacing.md,
+  },
+  matchContent: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'flex-start',
+  },
+  matchLeft: {
+    flex: 1,
+    marginRight: theme.spacing.md,
+  },
+  predictionRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: theme.spacing.xs,
+    marginBottom: theme.spacing.xs,
+  },
+  predictionLabel: {
+    fontWeight: '600',
+    color: theme.colors.text.primary,
+  },
+  matchTeams: {
+    fontWeight: '500',
+    marginBottom: theme.spacing.xs,
+    color: theme.colors.text.primary,
+  },
+  marketLabel: {
+    fontSize: 11,
+  },
+  matchOdds: {
+    fontWeight: '600',
+    fontSize: 16,
+    minWidth: 50,
+    textAlign: 'right',
+  },
   actionsContainer: {
     padding: theme.spacing.lg,
   },
   actionButton: {
     marginBottom: theme.spacing.md,
+  },
+  deleteButton: {
+    backgroundColor: theme.colors.status.error,
+    borderColor: theme.colors.status.error,
+  },
+  expirationNotice: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: theme.spacing.xs,
+    marginTop: theme.spacing.sm,
+    padding: theme.spacing.sm,
+    backgroundColor: `${theme.colors.status.warning}20`,
+    borderRadius: theme.borderRadius.card,
+  },
+  expiredNotice: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: theme.spacing.xs,
+    marginTop: theme.spacing.sm,
+    padding: theme.spacing.sm,
+    backgroundColor: `${theme.colors.status.error}20`,
+    borderRadius: theme.borderRadius.card,
   },
   loadingContainer: {
     flex: 1,

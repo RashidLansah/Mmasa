@@ -32,14 +32,11 @@ export const CreatorProfileScreen: React.FC<CreatorProfileScreenProps> = ({
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
+    // Initial fetch
     const fetchCreatorData = async () => {
       try {
-        const [creatorData, slipsData] = await Promise.all([
-          FirestoreService.getCreator(creatorId),
-          FirestoreService.getSlipsByCreator(creatorId),
-        ]);
+        const creatorData = await FirestoreService.getCreator(creatorId);
         setCreator(creatorData);
-        setCreatorSlips(slipsData);
       } catch (error) {
         console.error('Error fetching creator data:', error);
       } finally {
@@ -48,45 +45,68 @@ export const CreatorProfileScreen: React.FC<CreatorProfileScreenProps> = ({
     };
 
     fetchCreatorData();
+
+    // Set up real-time listener for creator's slips
+    const unsubscribe = FirestoreService.subscribeToCreatorSlips(creatorId, (updatedSlips) => {
+      setCreatorSlips(updatedSlips);
+      setLoading(false);
+    });
+
+    // Cleanup listener on unmount
+    return () => unsubscribe();
   }, [creatorId]);
 
-  const renderSlipCard = (slip: Slip) => (
-    <TouchableOpacity
-      onPress={() => navigation.navigate('SlipDetails', { slipId: slip.id })}
-    >
-      <Card style={styles.slipCard}>
-        <View style={styles.slipRow}>
-          <View style={styles.slipInfo}>
-            <AppText variant="bodySmall" style={styles.slipTitle}>
-              {slip.title}
-            </AppText>
-            <AppText variant="caption" color={theme.colors.text.secondary}>
-              {slip.sport} • {slip.league}
-            </AppText>
+  const renderSlipCard = (slip: Slip) => {
+    const isExpired = slip.expiresAt && new Date(slip.expiresAt) <= new Date();
+    
+    return (
+      <TouchableOpacity
+        onPress={() => navigation.navigate('SlipDetails', { slipId: slip.id })}
+      >
+        <Card style={[styles.slipCard, isExpired && styles.expiredSlipCard]}>
+          <View style={styles.slipRow}>
+            <View style={styles.slipInfo}>
+              <View style={styles.slipTitleRow}>
+                <AppText variant="bodySmall" style={styles.slipTitle}>
+                  {slip.title}
+                </AppText>
+                {isExpired && (
+                  <View style={styles.expiredBadge}>
+                    <Ionicons name="time-outline" size={12} color={theme.colors.status.error} />
+                    <AppText variant="caption" color={theme.colors.status.error} style={styles.expiredText}>
+                      Expired
+                    </AppText>
+                  </View>
+                )}
+              </View>
+              <AppText variant="caption" color={theme.colors.text.secondary}>
+                {slip.sport} • {slip.league}
+              </AppText>
+            </View>
+            <StatusBadge status={slip.status} />
           </View>
-          <StatusBadge status={slip.status} />
-        </View>
-        <View style={styles.slipStats}>
-          <View style={styles.slipStat}>
-            <AppText variant="caption" color={theme.colors.text.secondary}>
-              Odds
-            </AppText>
-            <AppText variant="bodySmall" style={styles.oddsValue}>
-              {slip.odds?.toFixed(2) || '0.00'}
-            </AppText>
+          <View style={styles.slipStats}>
+            <View style={styles.slipStat}>
+              <AppText variant="caption" color={theme.colors.text.secondary}>
+                Odds
+              </AppText>
+              <AppText variant="bodySmall" style={styles.oddsValue}>
+                {slip.odds?.toFixed(2) || '0.00'}
+              </AppText>
+            </View>
+            <View style={styles.slipStat}>
+              <AppText variant="caption" color={theme.colors.text.secondary}>
+                Match Date
+              </AppText>
+              <AppText variant="bodySmall">
+                {new Date(slip.matchDate).toLocaleDateString()}
+              </AppText>
+            </View>
           </View>
-          <View style={styles.slipStat}>
-            <AppText variant="caption" color={theme.colors.text.secondary}>
-              Match Date
-            </AppText>
-            <AppText variant="bodySmall">
-              {new Date(slip.matchDate).toLocaleDateString()}
-            </AppText>
-          </View>
-        </View>
-      </Card>
-    </TouchableOpacity>
-  );
+        </Card>
+      </TouchableOpacity>
+    );
+  };
 
   if (loading) {
     return (
@@ -134,6 +154,7 @@ export const CreatorProfileScreen: React.FC<CreatorProfileScreenProps> = ({
           </View>
           <AppText variant="bodySmall" color={theme.colors.text.secondary}>
             {creator.totalSlips || 0} slips • {creator.winRate?.toFixed(1) || '0.0'}% win rate
+            {creator.accuracy !== undefined && ` • ${creator.accuracy.toFixed(1)}% accuracy`}
           </AppText>
 
           <AppButton
@@ -146,8 +167,12 @@ export const CreatorProfileScreen: React.FC<CreatorProfileScreenProps> = ({
 
         <View style={styles.stats}>
           <StatPill label="Win Rate" value={`${creator.winRate?.toFixed(1) || '0.0'}%`} />
+          <StatPill label="Accuracy" value={`${creator.accuracy?.toFixed(1) || '0.0'}%`} />
           <StatPill label="Total Slips" value={(creator.totalSlips || 0).toString()} />
           <StatPill label="Subscribers" value={(creator.subscribers || 0).toString()} />
+          {creator.roi !== undefined && creator.roi > 0 && (
+            <StatPill label="ROI" value={`GH₵ ${creator.roi.toFixed(2)}`} />
+          )}
         </View>
 
         <View style={styles.tabsContainer}>
@@ -291,6 +316,29 @@ const styles = StyleSheet.create({
   },
   subscribeButton: {
     margin: theme.spacing.lg,
+  },
+  slipTitleRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: theme.spacing.xs,
+    marginBottom: 4,
+  },
+  expiredBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    paddingHorizontal: theme.spacing.xs,
+    paddingVertical: 2,
+    backgroundColor: `${theme.colors.status.error}20`,
+    borderRadius: theme.borderRadius.pill,
+  },
+  expiredText: {
+    fontSize: 10,
+  },
+  expiredSlipCard: {
+    opacity: 0.7,
+    borderLeftWidth: 3,
+    borderLeftColor: theme.colors.status.error,
   },
 });
 

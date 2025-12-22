@@ -6,6 +6,7 @@
 
 import { firebaseFirestore, Collections } from './firebase';
 import { collection, query, where, getDocs, getDoc, doc, updateDoc, increment } from 'firebase/firestore';
+import { FirestoreService } from './firestore.service';
 
 export interface SlipResultUpdate {
   slipId: string;
@@ -60,36 +61,14 @@ class ResultsUpdaterService {
 
   /**
    * Update creator statistics after slip result
+   * Uses FirestoreService.updateCreatorStats for consistency
    */
   private async updateCreatorStats(creatorId: string, result: 'won' | 'lost'): Promise<void> {
     try {
-      const creatorRef = doc(firebaseFirestore, Collections.CREATORS, creatorId);
+      // Use the centralized stat calculation from FirestoreService
+      await FirestoreService.updateCreatorStats(creatorId);
       
-      // Get all checked slips by this creator
-      const slipsQuery = query(
-        collection(firebaseFirestore, Collections.SLIPS),
-        where('creatorId', '==', creatorId),
-        where('resultChecked', '==', true)
-      );
-      const slipsSnapshot = await getDocs(slipsQuery);
-      
-      const totalSlips = slipsSnapshot.docs.length;
-      const wins = slipsSnapshot.docs.filter(doc => doc.data().status === 'won').length;
-      const winRate = totalSlips > 0 ? (wins / totalSlips) * 100 : 0;
-
-      // Check if creator exists
-      const creatorDoc = await getDoc(creatorRef);
-
-      if (creatorDoc.exists()) {
-        await updateDoc(creatorRef, {
-          totalSlips,
-          wins,
-          winRate: Math.round(winRate * 10) / 10, // Round to 1 decimal
-        });
-        console.log(`Creator ${creatorId} stats updated: ${totalSlips} slips, ${wins} wins, ${winRate.toFixed(1)}% win rate`);
-      } else {
-        console.log('Creator not in creators collection yet:', creatorId);
-      }
+      console.log(`Creator ${creatorId} stats updated after ${result} result`);
     } catch (error) {
       console.error('Error updating creator stats:', error);
       // Don't throw - slip update should succeed even if stats fail

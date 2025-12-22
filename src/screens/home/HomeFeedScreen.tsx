@@ -48,8 +48,22 @@ export const HomeFeedScreen: React.FC<HomeFeedScreenProps> = ({ navigation }) =>
   };
 
   useEffect(() => {
+    // Initial fetch
     fetchData();
-  }, []);
+    
+    // Set up real-time listener for slips
+    const unsubscribe = FirestoreService.subscribeToSlips((updatedSlips) => {
+      // Filter out current user's own slips from the feed
+      const filteredSlips = user 
+        ? updatedSlips.filter(slip => slip.creatorId !== user.uid)
+        : updatedSlips;
+      setSlips(filteredSlips);
+      setLoading(false);
+    });
+    
+    // Cleanup listener on unmount
+    return () => unsubscribe();
+  }, [user]);
 
   const onRefresh = async () => {
     setRefreshing(true);

@@ -11,6 +11,7 @@ const multer = require('multer');
 const tesseract = require('node-tesseract-ocr');
 const fs = require('fs');
 const path = require('path');
+const scrapeRouter = require('./scrape-booking-code');
 
 const app = express();
 const PORT = process.env.PORT || 3001;
@@ -18,6 +19,9 @@ const PORT = process.env.PORT || 3001;
 // Middleware
 app.use(cors());
 app.use(express.json());
+
+// Booking code scraping routes
+app.use('/api', scrapeRouter);
 
 // Configure multer for file uploads
 const upload = multer({ dest: 'uploads/' });
@@ -37,7 +41,8 @@ app.get('/', (req, res) => {
       health: 'GET /',
       ocr: 'POST /ocr',
       verifyAccount: 'POST /verify-account',
-      transfer: 'POST /transfer'
+      transfer: 'POST /transfer',
+      scrapeBookingCode: 'POST /api/scrape-booking-code'
     }
   });
 });
