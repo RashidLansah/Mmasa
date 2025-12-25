@@ -4,7 +4,7 @@ import { AppText } from './AppText';
 import { theme } from '../../design/theme';
 
 interface StatusBadgeProps {
-  status: 'pending' | 'won' | 'lost' | 'WON' | 'LOST' | 'ACTIVE';
+  status: 'pending' | 'active' | 'expired' | 'won' | 'lost' | 'WON' | 'LOST' | 'ACTIVE' | 'EXPIRED';
 }
 
 export const StatusBadge: React.FC<StatusBadgeProps> = ({ status }) => {
@@ -14,6 +14,8 @@ export const StatusBadge: React.FC<StatusBadgeProps> = ({ status }) => {
       case 'WON':
         return theme.colors.status.success;
       case 'LOST':
+        return theme.colors.status.error;
+      case 'EXPIRED':
         return theme.colors.status.error;
       case 'ACTIVE':
       case 'PENDING':

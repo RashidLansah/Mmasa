@@ -21,33 +21,34 @@ export const MySlipsScreen: React.FC<MySlipsScreenProps> = ({ navigation }) => {
   const [loading, setLoading] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
 
-  const fetchSlips = async () => {
-    if (!user) return;
-    
-    try {
-      // Fetch slips created by this user
-      const userCreatedSlips = await FirestoreService.getSlips(50);
-      const mySlips = userCreatedSlips.filter(slip => slip.creatorId === user.uid);
-      setCreatedSlips(mySlips);
-      
-      // TODO: Fetch purchased slips when subscription system is implemented
-      setPurchasedSlips([]);
-    } catch (error) {
-      console.error('Error fetching slips:', error);
-    } finally {
-      setLoading(false);
-      setRefreshing(false);
-    }
-  };
-
   useEffect(() => {
-    fetchSlips();
+    if (!user) return;
+
+    setLoading(true);
+    
+    // Subscribe to real-time updates for creator's slips
+    const unsubscribeCreated = FirestoreService.subscribeToCreatorSlips(
+      user.uid,
+      (slips) => {
+        setCreatedSlips(slips);
+        setLoading(false);
+        setRefreshing(false);
+      }
+    );
+
+    // TODO: Subscribe to purchased slips when subscription system is implemented
+    setPurchasedSlips([]);
+
+    // Cleanup subscription on unmount
+    return () => {
+      unsubscribeCreated();
+    };
   }, [user]);
 
-  const onRefresh = async () => {
+  const onRefresh = () => {
     setRefreshing(true);
-    await fetchSlips();
-    setRefreshing(false);
+    // Real-time listener will update automatically
+    setTimeout(() => setRefreshing(false), 500);
   };
 
   const currentSlips = activeTab === 'created' ? createdSlips : purchasedSlips;
@@ -62,11 +63,22 @@ export const MySlipsScreen: React.FC<MySlipsScreenProps> = ({ navigation }) => {
       >
         <View style={styles.slipCardContent}>
           <View style={styles.slipInfo}>
-            <AppText variant="body" style={styles.slipMainText}>
-              {item.title}
-            </AppText>
+            <View style={styles.slipTitleRow}>
+              <AppText variant="body" style={styles.slipMainText}>
+                {item.title}
+              </AppText>
+            </View>
             <AppText variant="caption" color={theme.colors.text.primary} style={styles.slipDescription}>
-              Odds {item.odds?.toFixed(2) || '0.00'} • {item.sport}
+              {item.extractionStatus === 'extracting' || !item.odds ? (
+                <View style={{ flexDirection: 'row', alignItems: 'center', gap: 4 }}>
+                  <Ionicons name="time-outline" size={12} color={theme.colors.text.secondary} />
+                  <AppText variant="caption" color={theme.colors.text.secondary}>
+                    Processing...
+                  </AppText>
+                </View>
+              ) : (
+                `Odds ${item.odds.toFixed(2)}`
+              )} • {item.sport}
             </AppText>
             <AppText variant="caption" color={theme.colors.text.secondary} style={styles.slipMeta}>
               {new Date(item.matchDate).toLocaleDateString()} • {item.likes} likes
@@ -226,10 +238,34 @@ const styles = StyleSheet.create({
     flex: 1,
     marginRight: theme.spacing.md,
   },
+  slipTitleRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: theme.spacing.xs,
+    marginBottom: theme.spacing.xs,
+    flexWrap: 'wrap',
+  },
   slipMainText: {
     ...theme.typography.body,
     fontWeight: '600',
-    marginBottom: theme.spacing.xs,
+    flex: 1,
+  },
+  expiredBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    paddingHorizontal: theme.spacing.xs,
+    paddingVertical: 2,
+    backgroundColor: `${theme.colors.status.error}20`,
+    borderRadius: theme.borderRadius.pill,
+  },
+  expiredText: {
+    fontSize: 10,
+  },
+  expiredSlipCard: {
+    opacity: 0.7,
+    borderLeftWidth: 3,
+    borderLeftColor: theme.colors.status.error,
   },
   slipDescription: {
     marginBottom: theme.spacing.xs,

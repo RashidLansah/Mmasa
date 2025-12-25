@@ -1,12 +1,14 @@
 import React from 'react';
 import {
-  TouchableOpacity,
+  Pressable,
   StyleSheet,
   ViewStyle,
   StyleProp,
   TextStyle,
   ActivityIndicator,
+  Platform,
 } from 'react-native';
+import * as Haptics from 'expo-haptics';
 import { AppText } from './AppText';
 import { theme } from '../../design/theme';
 
@@ -38,17 +40,27 @@ export const AppButton: React.FC<AppButtonProps> = ({
     variant === 'secondary' ? theme.colors.text.primary :
     theme.colors.accent.primary;
 
+  const handlePress = () => {
+    if (!disabled && !loading) {
+      // iOS haptic feedback
+      if (Platform.OS === 'ios') {
+        Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+      }
+      onPress();
+    }
+  };
+
   return (
-    <TouchableOpacity
-      style={[
+    <Pressable
+      style={({ pressed }) => [
         styles.button,
         buttonStyle,
         (disabled || loading) ? styles.disabled : null,
+        pressed && !disabled && !loading ? styles.pressed : null,
         style,
       ]}
-      onPress={onPress}
+      onPress={handlePress}
       disabled={disabled || loading}
-      activeOpacity={0.7}
     >
       {loading ? (
         <ActivityIndicator color={textColor} />
@@ -57,7 +69,7 @@ export const AppButton: React.FC<AppButtonProps> = ({
           {title}
         </AppText>
       )}
-    </TouchableOpacity>
+    </Pressable>
   );
 };
 
@@ -86,8 +98,14 @@ const styles = StyleSheet.create({
   disabled: {
     opacity: 0.5,
   },
+  pressed: {
+    opacity: 0.8,
+    transform: [{ scale: 0.98 }], // iOS-style press animation
+  },
   text: {
     fontWeight: '600',
+    // Use iOS system font (San Francisco)
+    fontFamily: Platform.OS === 'ios' ? 'System' : 'Roboto',
   },
 });
 

@@ -1,5 +1,5 @@
 import React from 'react';
-import { Text, StyleSheet, TextProps, TextStyle } from 'react-native';
+import { Text, StyleSheet, TextProps, TextStyle, Platform } from 'react-native';
 import { theme } from '../../design/theme';
 
 type TextVariant = 'display' | 'h1' | 'h2' | 'h3' | 'body' | 'bodySmall' | 'caption';

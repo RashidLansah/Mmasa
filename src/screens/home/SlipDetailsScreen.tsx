@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { View, StyleSheet, ScrollView, Image, TouchableOpacity, ActivityIndicator, Alert } from 'react-native';
+import { View, StyleSheet, ScrollView, Image, TouchableOpacity, ActivityIndicator } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 // @ts-ignore - Library has no types  
 import { usePaystack } from 'react-native-paystack-webview';
@@ -13,6 +13,8 @@ import { FirestoreService, Slip } from '../../services/firestore.service';
 import { DeepLink} from '../../services/deeplink.service';
 import { useAuth } from '../../contexts/AuthContext';
 import { Paystack as PaystackService } from '../../services/paystack.service';
+import { showToast, showError, showSuccess } from '../../utils/toast.service';
+import { useActionSheetService } from '../../utils/actionSheet.service';
 
 interface SlipDetailsScreenProps {
   navigation: any;
@@ -30,6 +32,7 @@ export const SlipDetailsScreen: React.FC<SlipDetailsScreenProps> = ({
   const [purchasing, setPurchasing] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const { popup } = usePaystack();
+  const { showActionSheet } = useActionSheetService();
 
   useEffect(() => {
     // Set up real-time listener for slip updates
@@ -46,9 +49,34 @@ export const SlipDetailsScreen: React.FC<SlipDetailsScreenProps> = ({
     // Cleanup listener on unmount
     return () => unsubscribe();
   }, [slipId]);
-
-  const handlePurchase = () => {
+  
+  const handlePurchase = async () => {
     if (!user || !userProfile || !slip) return;
+    
+    // SERVER-SIDE VERIFICATION: Call backend to verify slip is still purchasable
+    // This prevents race conditions where slip expires between client check and payment
+    try {
+      const SERVER_URL = __DEV__ ? 'http://192.168.1.152:3001' : 'https://your-production-server.com';
+      const verifyResponse = await fetch(`${SERVER_URL}/api/verify-slip-purchase`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ slipId: slip.id })
+      });
+      
+      const verifyResult = await verifyResponse.json();
+      
+      if (!verifyResult.success || !verifyResult.purchasable) {
+        showError(
+          verifyResult.message || 'This slip cannot be purchased at this time.',
+          verifyResult.code === 'SLIP_EXPIRED' ? 'Slip Expired' : 'Purchase Failed'
+        );
+        return;
+      }
+    } catch (error) {
+      console.error('Error verifying slip purchase:', error);
+      // Continue with purchase if verification fails (graceful degradation)
+      // Server will still block it if expired when processing payment
+    }
 
     // Trigger Paystack payment popup
     popup.checkout({
@@ -80,7 +108,21 @@ export const SlipDetailsScreen: React.FC<SlipDetailsScreenProps> = ({
       console.log('🔍 Verifying payment:', reference);
       
       // Add user to purchasedBy array
-      await FirestoreService.purchaseSlip(slip.id, user.uid);
+      // NOTE: purchaseSlip now includes expiry check - will throw if expired
+      try {
+        await FirestoreService.purchaseSlip(slip.id, user.uid);
+      } catch (error: any) {
+        // Handle expiry error specifically
+        if (error.message && error.message.includes('SLIP_EXPIRED')) {
+          showError(
+            'This slip has expired and can no longer be purchased. Your payment will be refunded.',
+            'Purchase Failed'
+          );
+          setPurchasing(false);
+          return;
+        }
+        throw error; // Re-throw other errors
+      }
 
       // Calculate platform fee (10%) and creator earnings (90%)
       const purchaseAmount = slip.price || 0;
@@ -142,14 +184,10 @@ export const SlipDetailsScreen: React.FC<SlipDetailsScreenProps> = ({
       const updatedSlip = await FirestoreService.getSlip(slip.id);
       setSlip(updatedSlip);
 
-      Alert.alert(
-        'Purchase Successful! 🎉',
-        'You can now view the full slip details',
-        [{ text: 'OK' }]
-      );
+      showSuccess('You can now view the full slip details', 'Purchase Successful! 🎉');
     } catch (error: any) {
       console.error('❌ Payment processing error:', error);
-      Alert.alert('Error', 'Failed to complete purchase. Please contact support.');
+      showError('Failed to complete purchase. Please contact support.', 'Error');
     } finally {
       setPurchasing(false);
     }
@@ -157,12 +195,12 @@ export const SlipDetailsScreen: React.FC<SlipDetailsScreenProps> = ({
 
   const handlePaymentCancel = () => {
     console.log('⚠️  Payment cancelled by user');
-    Alert.alert('Payment Cancelled', 'You cancelled the payment');
+    showToast('Payment cancelled', 'Payment Cancelled');
   };
 
   const handlePaymentError = (error: any) => {
     console.error('❌ Payment error:', error);
-    Alert.alert('Payment Failed', 'An error occurred during payment. Please try again.');
+    showError('An error occurred during payment. Please try again.', 'Payment Failed');
   };
 
   /**
@@ -171,34 +209,35 @@ export const SlipDetailsScreen: React.FC<SlipDetailsScreenProps> = ({
   const handleDeleteSlip = () => {
     if (!slip || !user) return;
 
-    Alert.alert(
-      'Delete Slip',
-      'Are you sure you want to delete this slip? This action cannot be undone.',
-      [
-        { text: 'Cancel', style: 'cancel' },
+    showActionSheet({
+      title: 'Delete Slip',
+      message: 'Are you sure you want to delete this slip? This action cannot be undone.',
+      options: [
         {
-          text: 'Delete',
-          style: 'destructive',
+          label: 'Delete',
           onPress: async () => {
             setDeleting(true);
             try {
               await FirestoreService.deleteSlip(slip.id, user.uid);
-              Alert.alert(
-                'Deleted',
-                'Slip has been deleted successfully',
-                [{ text: 'OK', onPress: () => navigation.goBack() }]
-              );
+              showSuccess('Slip has been deleted successfully', 'Deleted');
+              // Navigate back after a short delay
+              setTimeout(() => {
+                navigation.goBack();
+              }, 1500);
             } catch (error: any) {
               console.error('Error deleting slip:', error);
-              Alert.alert('Error', error.message || 'Failed to delete slip');
+              showError(error.message || 'Failed to delete slip', 'Error');
             } finally {
               setDeleting(false);
             }
           },
+          destructive: true,
         },
-      ]
-    );
+      ],
+      cancelButtonIndex: 1, // Cancel is second option (after Delete)
+    });
   };
+
 
   const hasAccess = !slip?.isPremium || slip?.creatorId === user?.uid || slip?.purchasedBy?.includes(user?.uid || '');
   const isCreator = slip?.creatorId === user?.uid;
@@ -265,7 +304,21 @@ export const SlipDetailsScreen: React.FC<SlipDetailsScreenProps> = ({
               <AppText variant="caption" color={theme.colors.text.secondary}>
                 Odds
               </AppText>
-              <AppText variant="h2" style={styles.oddsText}>{slip.odds?.toFixed(2) || '0.00'}</AppText>
+              {slip.extractionStatus === 'extracting' || !slip.odds ? (
+                <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+                  <Ionicons name="time-outline" size={20} color={theme.colors.text.secondary} />
+                  <AppText variant="h2" style={[styles.oddsText, { color: theme.colors.text.secondary }]}>
+                    —
+                  </AppText>
+                </View>
+              ) : (
+                <>
+                  <AppText variant="h2" style={styles.oddsText}>{slip.odds.toFixed(2)}</AppText>
+                  <AppText variant="caption" color={theme.colors.text.secondary} style={{ fontSize: 10, marginTop: 4, fontStyle: 'italic' }}>
+                    *Odds may change when loaded on {slip.platform || 'the betting platform'}
+                  </AppText>
+                </>
+              )}
             </View>
           </View>
 
@@ -329,38 +382,54 @@ export const SlipDetailsScreen: React.FC<SlipDetailsScreenProps> = ({
 
           {/* Premium Paywall - Show if user doesn't have access */}
           {slip.isPremium && !hasAccess && (
-            <Card style={styles.premiumCard}>
+            <Card glass intensity={70} style={styles.premiumCard}>
               <View style={styles.premiumHeader}>
                 <Ionicons name="lock-closed" size={48} color={theme.colors.accent.primary} />
                 <AppText variant="h2" style={styles.premiumTitle}>
                   Premium Slip
                 </AppText>
               </View>
-              
-              <AppText variant="body" color={theme.colors.text.secondary} style={styles.premiumDescription}>
-                Unlock this premium slip to view the full screenshot, betting details, and expert analysis.
-              </AppText>
-              
-              <View style={styles.priceContainer}>
-                <AppText variant="h1" color={theme.colors.accent.primary}>
-                  GH₵ {slip.price?.toFixed(2)}
-                </AppText>
-              </View>
-              
-              <AppButton
-                title={purchasing ? "Processing..." : "Unlock Premium Slip"}
-                onPress={handlePurchase}
-                variant="primary"
-                disabled={purchasing}
-                style={{ width: '100%' }}
-              />
-              
-              <View style={styles.securePayment}>
-                <Ionicons name="shield-checkmark" size={16} color={theme.colors.status.success} />
-                <AppText variant="caption" color={theme.colors.text.secondary} style={styles.secureText}>
-                  Secure payment via Paystack
-                </AppText>
-              </View>
+
+              {false ? (
+                <View style={{ alignItems: 'center', paddingVertical: theme.spacing.md }}>
+                  <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8, marginBottom: theme.spacing.sm }}>
+                    <Ionicons name="time-outline" size={24} color={theme.colors.status.error} />
+                    <AppText variant="body" color={theme.colors.status.error} style={{ fontWeight: '600' }}>
+                      This slip has expired
+                    </AppText>
+                  </View>
+                  <AppText variant="bodySmall" color={theme.colors.text.secondary} style={{ textAlign: 'center' }}>
+                    Slips expire 15 minutes before the first match kickoff and can no longer be purchased.
+                  </AppText>
+                </View>
+              ) : (
+                <>
+                  <AppText variant="body" color={theme.colors.text.secondary} style={styles.premiumDescription}>
+                    Unlock this premium slip to view the full screenshot, betting details, and expert analysis.
+                  </AppText>
+                  
+                  <View style={styles.priceContainer}>
+                    <AppText variant="h1" color={theme.colors.accent.primary}>
+                      GH₵ {slip.price?.toFixed(2)}
+                    </AppText>
+                  </View>
+                  
+                  <AppButton
+                    title={purchasing ? "Processing..." : "Unlock Premium Slip"}
+                    onPress={handlePurchase}
+                    variant="primary"
+                    disabled={purchasing}
+                    style={{ width: '100%' }}
+                  />
+                  
+                  <View style={styles.securePayment}>
+                    <Ionicons name="shield-checkmark" size={16} color={theme.colors.status.success} />
+                    <AppText variant="caption" color={theme.colors.text.secondary} style={styles.secureText}>
+                      Secure payment via Paystack
+                    </AppText>
+                  </View>
+                </>
+              )}
             </Card>
           )}
 
@@ -416,9 +485,18 @@ export const SlipDetailsScreen: React.FC<SlipDetailsScreenProps> = ({
                               {marketLabel}
                             </AppText>
                           </View>
-                          <AppText variant="bodySmall" color={theme.colors.accent.primary} style={styles.matchOdds}>
-                            {match.odds.toFixed(2)}
-                          </AppText>
+                          {match.odds ? (
+                            <AppText variant="bodySmall" color={theme.colors.accent.primary} style={styles.matchOdds}>
+                              {match.odds.toFixed(2)}
+                            </AppText>
+                          ) : (
+                            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 4 }}>
+                              <Ionicons name="time-outline" size={12} color={theme.colors.text.secondary} />
+                              <AppText variant="bodySmall" color={theme.colors.text.secondary} style={styles.matchOdds}>
+                                —
+                              </AppText>
+                            </View>
+                          )}
                         </View>
                       </View>
                     );
@@ -484,9 +562,28 @@ export const SlipDetailsScreen: React.FC<SlipDetailsScreenProps> = ({
               <AppText variant="caption" color={theme.colors.text.secondary}>
                 Total Odds
               </AppText>
-              <AppText variant="bodySmall" style={styles.statValue}>
-                {slip.odds?.toFixed(2) || '0.00'}
-              </AppText>
+              <View>
+                <AppText variant="bodySmall" style={styles.statValue}>
+                  {slip.extractionStatus === 'extracting' || !slip.odds ? (
+                    <View style={{ flexDirection: 'row', alignItems: 'center', gap: 4 }}>
+                      <Ionicons name="time-outline" size={12} color={theme.colors.text.secondary} />
+                      <AppText variant="caption" color={theme.colors.text.secondary}>—</AppText>
+                    </View>
+                  ) : (
+                    slip.odds.toFixed(2)
+                  )}
+                </AppText>
+                {slip.odds && (
+                  <AppText variant="caption" color={theme.colors.text.secondary} style={{ fontSize: 9, marginTop: 2, fontStyle: 'italic' }}>
+                    *May change when loaded
+                  </AppText>
+                )}
+              </View>
+              {slip.odds && (
+                <AppText variant="caption" color={theme.colors.text.secondary} style={{ fontSize: 10, marginTop: 2, fontStyle: 'italic' }}>
+                  *Odds may change when loaded
+                </AppText>
+              )}
             </View>
             <View style={styles.statItem}>
               <AppText variant="caption" color={theme.colors.text.secondary}>
@@ -510,24 +607,38 @@ export const SlipDetailsScreen: React.FC<SlipDetailsScreenProps> = ({
             Published {new Date(slip.createdAt).toLocaleDateString()}
           </AppText>
           
-          {/* Expiration notice */}
-          {slip.expiresAt && new Date(slip.expiresAt) > new Date() && (
-            <View style={styles.expirationNotice}>
-              <Ionicons name="time-outline" size={16} color={theme.colors.status.warning} />
-              <AppText variant="caption" color={theme.colors.status.warning}>
-                Expires {new Date(slip.expiresAt).toLocaleString()}
-              </AppText>
-            </View>
-          )}
-          
-          {slip.expiresAt && new Date(slip.expiresAt) <= new Date() && (
-            <View style={styles.expiredNotice}>
-              <Ionicons name="close-circle" size={16} color={theme.colors.status.error} />
-              <AppText variant="caption" color={theme.colors.status.error}>
-                This slip has expired
-              </AppText>
-            </View>
-          )}
+          {/* Expiration notice - only show if expiresAt is set and valid */}
+          {slip.expiresAt && (() => {
+            const expiresAt = new Date(slip.expiresAt);
+            const now = new Date();
+            const isValidDate = !isNaN(expiresAt.getTime());
+            
+            if (!isValidDate) {
+              return null; // Invalid date, don't show anything
+            }
+            
+            if (expiresAt > now) {
+              // Not expired yet
+              return (
+                <View style={styles.expirationNotice}>
+                  <Ionicons name="time-outline" size={16} color={theme.colors.status.warning} />
+                  <AppText variant="caption" color={theme.colors.status.warning}>
+                    Expires {expiresAt.toLocaleString()}
+                  </AppText>
+                </View>
+              );
+            } else {
+              // Expired
+              return (
+                <View style={styles.expiredNotice}>
+                  <Ionicons name="close-circle" size={16} color={theme.colors.status.error} />
+                  <AppText variant="caption" color={theme.colors.status.error}>
+                    This slip has expired
+                  </AppText>
+                </View>
+              );
+            }
+          })()}
         </Card>
 
         {/* Action buttons - Delete for creator, Purchase for others */}
@@ -690,6 +801,46 @@ const styles = StyleSheet.create({
     padding: theme.spacing.sm,
     backgroundColor: `${theme.colors.status.warning}20`,
     borderRadius: theme.borderRadius.card,
+  },
+  expiredCard: {
+    margin: theme.spacing.lg,
+    marginTop: 0,
+    backgroundColor: `${theme.colors.status.error}10`,
+    borderWidth: 2,
+    borderColor: theme.colors.status.error,
+  },
+  expiredCardContent: {
+    alignItems: 'center',
+    padding: theme.spacing.lg,
+  },
+  expiredCardTitle: {
+    marginTop: theme.spacing.md,
+    marginBottom: theme.spacing.sm,
+    color: theme.colors.status.error,
+  },
+  expiredCardText: {
+    textAlign: 'center',
+    marginTop: theme.spacing.sm,
+  },
+  expiredCard: {
+    margin: theme.spacing.lg,
+    marginTop: 0,
+    backgroundColor: `${theme.colors.status.error}10`,
+    borderWidth: 2,
+    borderColor: theme.colors.status.error,
+  },
+  expiredCardContent: {
+    alignItems: 'center',
+    padding: theme.spacing.lg,
+  },
+  expiredCardTitle: {
+    marginTop: theme.spacing.md,
+    marginBottom: theme.spacing.sm,
+    color: theme.colors.status.error,
+  },
+  expiredCardText: {
+    textAlign: 'center',
+    marginTop: theme.spacing.sm,
   },
   expiredNotice: {
     flexDirection: 'row',

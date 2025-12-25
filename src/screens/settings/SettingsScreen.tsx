@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { View, StyleSheet, ScrollView, TouchableOpacity, Switch, Alert, ActivityIndicator } from 'react-native';
+import { View, StyleSheet, ScrollView, TouchableOpacity, Switch, ActivityIndicator } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { AppScreen } from '../../components/common/AppScreen';
 import { AppText } from '../../components/common/AppText';
@@ -7,6 +7,8 @@ import { Card } from '../../components/common/Card';
 import { theme } from '../../design/theme';
 import { useAuth } from '../../contexts/AuthContext';
 import { FirestoreService, MobileMoneyAccount } from '../../services/firestore.service';
+import { useActionSheetService } from '../../utils/actionSheet.service';
+import { showError } from '../../utils/toast.service';
 
 interface SettingsScreenProps {
   navigation: any;
@@ -17,6 +19,7 @@ export const SettingsScreen: React.FC<SettingsScreenProps> = ({ navigation }) =>
   const [accounts, setAccounts] = useState<MobileMoneyAccount[]>([]);
   const [loadingAccounts, setLoadingAccounts] = useState(true);
   const { user, userProfile, signOut } = useAuth();
+  const { showActionSheet } = useActionSheetService();
 
   useEffect(() => {
     fetchAccounts();
@@ -37,27 +40,24 @@ export const SettingsScreen: React.FC<SettingsScreenProps> = ({ navigation }) =>
   };
 
   const handleLogout = () => {
-    Alert.alert(
-      'Logout',
-      'Are you sure you want to logout?',
-      [
+    showActionSheet({
+      title: 'Logout',
+      message: 'Are you sure you want to logout?',
+      options: [
         {
-          text: 'Cancel',
-          style: 'cancel',
-        },
-        {
-          text: 'Logout',
-          style: 'destructive',
+          label: 'Logout',
           onPress: async () => {
             try {
               await signOut();
             } catch (error: any) {
-              Alert.alert('Error', 'Failed to logout');
+              showError('Failed to logout', 'Error');
             }
           },
+          destructive: true,
         },
-      ]
-    );
+      ],
+      cancelButtonIndex: 1, // Cancel is second option
+    });
   };
 
   return (

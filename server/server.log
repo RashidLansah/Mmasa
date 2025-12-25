@@ -1,3 +1,7 @@
+
+> mmasa-ocr-server@1.0.0 start
+> node index.js
+
 🚀 OCR Server running on:
    - Local:   http://localhost:3001
    - Network: http://192.168.1.152:3001
@@ -6,3 +10,7 @@
 💡 Usage:
    curl -X POST -F "image=@slip.jpg" http://192.168.1.152:3001/ocr
 
+⚠️ Total odds not found in HTML, calculated from matches: 25.80
+⚠️ Total odds not found in HTML, calculated from matches: 25.80
+⚠️ Total odds not found in HTML, calculated from matches: 25.80
+⚠️ Total odds not found in HTML, calculated from matches: 2.30

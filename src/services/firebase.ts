@@ -3,14 +3,16 @@ import { getAuth } from 'firebase/auth';
 import { getFirestore } from 'firebase/firestore';
 import { getStorage } from 'firebase/storage';
 
-// Firebase configuration from GoogleService-Info.plist
+// Firebase configuration
+// SECURITY: In production, use environment variables or app.json
+// For Expo, you can use app.json or expo-constants
 const firebaseConfig = {
-  apiKey: "AIzaSyCoh832PXv3T1hLclcZZOppCdDgSyki_P4",
-  authDomain: "sureodds-8f685.firebaseapp.com",
-  projectId: "sureodds-8f685",
-  storageBucket: "sureodds-8f685.firebasestorage.app",
-  messagingSenderId: "1029849188268",
-  appId: "1:1029849188268:ios:f0337a9a001efebbebdc09"
+  apiKey: process.env.FIREBASE_API_KEY || "AIzaSyCoh832PXv3T1hLclcZZOppCdDgSyki_P4", // ⚠️ TODO: Move to .env
+  authDomain: process.env.FIREBASE_AUTH_DOMAIN || "sureodds-8f685.firebaseapp.com",
+  projectId: process.env.FIREBASE_PROJECT_ID || "sureodds-8f685",
+  storageBucket: process.env.FIREBASE_STORAGE_BUCKET || "sureodds-8f685.firebasestorage.app",
+  messagingSenderId: process.env.FIREBASE_MESSAGING_SENDER_ID || "1029849188268",
+  appId: process.env.FIREBASE_APP_ID || "1:1029849188268:ios:f0337a9a001efebbebdc09"
 };
 
 // Initialize Firebase

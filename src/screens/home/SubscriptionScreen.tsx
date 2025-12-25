@@ -61,6 +61,8 @@ export const SubscriptionScreen: React.FC<SubscriptionScreenProps> = ({
           {plans.map((plan) => (
             <Card
               key={plan.id}
+              glass={plan.popular} // Glass effect for popular plan
+              intensity={plan.popular ? 80 : 60}
               style={plan.popular ? [styles.planCard, styles.popularCard] : styles.planCard}
             >
               {plan.popular && (

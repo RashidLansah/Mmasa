@@ -120,9 +120,18 @@ export const HomeFeedScreen: React.FC<HomeFeedScreenProps> = ({ navigation }) =>
         <View style={styles.slipCardContent}>
           <View style={styles.slipInfo}>
             <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8, marginBottom: 4 }}>
-              <AppText variant="body" style={styles.slipMainText}>
-                Odds {item.odds?.toFixed(2) || '0.00'}
-              </AppText>
+              {item.extractionStatus === 'extracting' || !item.odds ? (
+                <View style={{ flexDirection: 'row', alignItems: 'center', gap: 4 }}>
+                  <Ionicons name="time-outline" size={14} color={theme.colors.text.secondary} />
+                  <AppText variant="body" style={[styles.slipMainText, { color: theme.colors.text.secondary }]}>
+                    Processing...
+                  </AppText>
+                </View>
+              ) : (
+                <AppText variant="body" style={styles.slipMainText}>
+                  Odds {item.odds.toFixed(2)}
+                </AppText>
+              )}
               {item.isPremium && item.purchasedBy?.includes(user?.uid || '') && (
                 <View style={{ flexDirection: 'row', alignItems: 'center', gap: 4 }}>
                   <Ionicons name="checkmark-circle" size={14} color={theme.colors.status.success} />
@@ -237,17 +246,17 @@ export const HomeFeedScreen: React.FC<HomeFeedScreenProps> = ({ navigation }) =>
             </View>
           ) : slips.length === 0 ? (
             <View style={styles.emptySlips}>
-              <AppText variant="body" color={theme.colors.text.secondary}>
-                No slips available yet
+              <Ionicons 
+                name="document-text-outline" 
+                size={64} 
+                color={theme.colors.text.secondary} 
+              />
+              <AppText variant="h3" style={styles.emptyTitle}>
+                No Slips Available
               </AppText>
-              <TouchableOpacity
-                onPress={() => navigation.navigate('SlipUpload')}
-                style={styles.createFirstButton}
-              >
-                <AppText variant="bodySmall" color={theme.colors.accent.primary}>
-                  Create First Slip
-                </AppText>
-              </TouchableOpacity>
+              <AppText variant="body" color={theme.colors.text.secondary} style={styles.emptyText}>
+                Check back soon for new betting predictions from top creators
+              </AppText>
             </View>
           ) : (
             <View style={styles.slipsList}>
@@ -424,15 +433,16 @@ const styles = StyleSheet.create({
   },
   emptySlips: {
     paddingHorizontal: theme.spacing.lg,
-    paddingVertical: theme.spacing.xl,
+    paddingVertical: theme.spacing.xxl,
     alignItems: 'center',
   },
-  createFirstButton: {
-    marginTop: theme.spacing.md,
-    paddingVertical: theme.spacing.sm,
+  emptyTitle: {
+    marginTop: theme.spacing.lg,
+    marginBottom: theme.spacing.sm,
+  },
+  emptyText: {
+    textAlign: 'center',
     paddingHorizontal: theme.spacing.lg,
-    backgroundColor: theme.colors.background.raised,
-    borderRadius: theme.borderRadius.pill,
   },
   floatingButton: {
     position: 'absolute',

@@ -38,63 +38,228 @@ class AutoVerifyService {
 
       const slipData = slipSnapshot.docs[0].data();
 
-      // Check if slip has fixture ID for API verification
-      if (!slipData.fixtureId) {
-        // Try to find fixture by team names
-        const fixtureId = await SportsAPI.searchFixtureByTeams(
-          slipData.homeTeam,
-          slipData.awayTeam,
-          slipData.matchDate?.toDate?.() || new Date(slipData.matchDate)
-        );
+      // Check if slip has multiple matches (accumulator) or single match
+      const hasMatchesArray = Array.isArray(slipData.matches) && slipData.matches.length > 0;
+      
+      if (hasMatchesArray) {
+        // Handle accumulator slips with multiple matches
+        return await this.verifyAccumulatorSlip(slipId, slipData, slipRef);
+      } else {
+        // Handle single match slips (legacy format)
+        return await this.verifySingleMatchSlip(slipId, slipData, slipRef);
+      }
+    } catch (error: any) {
+      console.error('Error verifying slip:', error);
+      return { slipId, verified: false, error: error.message };
+    }
+  }
 
+  /**
+   * Verify a single match slip
+   */
+  private async verifySingleMatchSlip(
+    slipId: string,
+    slipData: any,
+    slipRef: any
+  ): Promise<VerificationResult> {
+    // Check if slip has fixture ID for API verification
+    if (!slipData.fixtureId) {
+      // Try to find fixture by team names
+      const fixtureId = await SportsAPI.searchFixtureByTeams(
+        slipData.homeTeam,
+        slipData.awayTeam,
+        slipData.matchDate?.toDate?.() || new Date(slipData.matchDate)
+      );
+
+      if (fixtureId) {
+        // Save fixture ID for future use
+        await updateDoc(slipRef, { fixtureId });
+        slipData.fixtureId = fixtureId;
+      } else {
+        return { slipId, verified: false, error: 'Match not found in API' };
+      }
+    }
+
+    // Get match result from API
+    const result = await SportsAPI.getMatchResult(slipData.fixtureId);
+
+    if (!result) {
+      return { slipId, verified: false, error: 'Result not available yet' };
+    }
+
+    if (!result.completed) {
+      return { slipId, verified: false, error: 'Match not finished' };
+    }
+
+    // Verify bet based on type
+    const betType = slipData.betType || 'h2h';
+    const prediction = slipData.prediction || 'home';
+    const line = slipData.line;
+
+    const status = SportsAPI.verifyBetResult(
+      betType,
+      prediction,
+      result.home_score,
+      result.away_score,
+      line
+    );
+
+    // Update slip with result
+    await updateDoc(slipRef, {
+      status,
+      homeScore: result.home_score,
+      awayScore: result.away_score,
+      resultChecked: true,
+      autoVerified: true,
+    });
+
+    // Update creator stats
+    await ResultsUpdater['updateCreatorStats'](slipData.creatorId, status);
+
+    return { slipId, verified: true, status };
+  }
+
+  /**
+   * Verify an accumulator slip with multiple matches
+   */
+  private async verifyAccumulatorSlip(
+    slipId: string,
+    slipData: any,
+    slipRef: any
+  ): Promise<VerificationResult> {
+    try {
+      const matches = slipData.matches || [];
+    const now = new Date();
+    const twoHoursAgo = new Date(now.getTime() - 2 * 60 * 60 * 1000);
+    
+    // Check all matches to see if they're finished
+    const matchResults: Array<{
+      match: any;
+      result: any;
+      status: 'won' | 'lost' | 'pending';
+    }> = [];
+    
+    let allMatchesFinished = true;
+    let allMatchesWon = true;
+    
+    for (const match of matches) {
+      const matchDate = match.matchDate?.toDate?.() || new Date(match.matchDate);
+      
+      // Skip if match hasn't happened yet or is too recent
+      if (matchDate > twoHoursAgo) {
+        allMatchesFinished = false;
+        matchResults.push({
+          match,
+          result: null,
+          status: 'pending',
+        });
+        continue;
+      }
+      
+      // Get fixture ID for this match
+      let fixtureId = match.fixtureId;
+      
+      if (!fixtureId) {
+        // Try to find fixture by team names
+        fixtureId = await SportsAPI.searchFixtureByTeams(
+          match.homeTeam,
+          match.awayTeam,
+          matchDate
+        );
+        
         if (fixtureId) {
-          // Save fixture ID for future use
-          await updateDoc(slipRef, { fixtureId });
-          slipData.fixtureId = fixtureId;
+          // Update the match with fixture ID
+          const matchesArray = [...matches];
+          const matchIndex = matchesArray.findIndex(
+            m => m.homeTeam === match.homeTeam && m.awayTeam === match.awayTeam
+          );
+          if (matchIndex >= 0) {
+            matchesArray[matchIndex] = { ...matchesArray[matchIndex], fixtureId };
+            await updateDoc(slipRef, { matches: matchesArray });
+          }
         } else {
-          return { slipId, verified: false, error: 'Match not found in API' };
+          allMatchesFinished = false;
+          matchResults.push({
+            match,
+            result: null,
+            status: 'pending',
+          });
+          continue;
         }
       }
-
+      
       // Get match result from API
-      const result = await SportsAPI.getMatchResult(slipData.fixtureId);
-
-      if (!result) {
-        return { slipId, verified: false, error: 'Result not available yet' };
+      const result = await SportsAPI.getMatchResult(fixtureId);
+      
+      if (!result || !result.completed) {
+        allMatchesFinished = false;
+        matchResults.push({
+          match,
+          result: null,
+          status: 'pending',
+        });
+        continue;
       }
-
-      if (!result.completed) {
-        return { slipId, verified: false, error: 'Match not finished' };
-      }
-
-      // Verify bet based on type
-      const betType = slipData.betType || 'h2h';
-      const prediction = slipData.prediction || 'home';
-      const line = slipData.line;
-
-      const status = SportsAPI.verifyBetResult(
+      
+      // Verify this match's prediction
+      const betType = match.market === 'h2h' ? 'h2h' : (slipData.betType || 'h2h');
+      const prediction = match.prediction?.toLowerCase() || 'home';
+      const line = match.line;
+      
+      const matchStatus = SportsAPI.verifyBetResult(
         betType,
         prediction,
         result.home_score,
         result.away_score,
         line
       );
-
-      // Update slip with result
-      await updateDoc(slipRef, {
-        status,
-        homeScore: result.home_score,
-        awayScore: result.away_score,
-        resultChecked: true,
-        autoVerified: true,
+      
+      if (matchStatus === 'lost') {
+        allMatchesWon = false;
+      }
+      
+      matchResults.push({
+        match,
+        result,
+        status: matchStatus,
       });
-
+    }
+    
+    // If not all matches are finished, can't verify yet
+    if (!allMatchesFinished) {
+      return { 
+        slipId, 
+        verified: false, 
+        error: 'Not all matches have finished yet' 
+      };
+    }
+    
+    // Determine overall slip status
+    // For accumulator: all matches must win for slip to win
+    const overallStatus: 'won' | 'lost' = allMatchesWon ? 'won' : 'lost';
+    
+    // Update slip with result
+    // Use first match's scores for backward compatibility
+    const firstResult = matchResults.find(mr => mr.result)?.result;
+    await updateDoc(slipRef, {
+      status: overallStatus,
+      homeScore: firstResult?.home_score,
+      awayScore: firstResult?.away_score,
+      resultChecked: true,
+      autoVerified: true,
+      matches: matches.map((m: any, index: number) => ({
+        ...m,
+        homeScore: matchResults[index]?.result?.home_score,
+        awayScore: matchResults[index]?.result?.away_score,
+      })),
+    });
+    
       // Update creator stats
-      await ResultsUpdater['updateCreatorStats'](slipData.creatorId, status);
-
-      return { slipId, verified: true, status };
+      await ResultsUpdater['updateCreatorStats'](slipData.creatorId, overallStatus);
+      
+      return { slipId, verified: true, status: overallStatus };
     } catch (error: any) {
-      console.error('Error verifying slip:', error);
+      console.error('Error verifying accumulator slip:', error);
       return { slipId, verified: false, error: error.message };
     }
   }
@@ -120,12 +285,33 @@ class AutoVerifyService {
 
       for (const docSnap of snapshot.docs) {
         const slipData = docSnap.data();
-        const matchDate = slipData.matchDate?.toDate?.() || new Date(slipData.matchDate);
-
-        // Only verify if match was more than 2 hours ago (to ensure it's finished)
-        const twoHoursAgo = new Date(now.getTime() - 2 * 60 * 60 * 1000);
         
-        if (matchDate < twoHoursAgo) {
+        // For accumulator slips, check if all matches are finished
+        // For single match slips, check the main matchDate
+        const hasMatchesArray = Array.isArray(slipData.matches) && slipData.matches.length > 0;
+        
+        let shouldVerify = false;
+        
+        if (hasMatchesArray) {
+          // For accumulator: check if earliest match was more than 2 hours ago
+          const matches = slipData.matches || [];
+          const earliestMatch = matches
+            .map((m: any) => m.matchDate?.toDate?.() || new Date(m.matchDate))
+            .filter((d: Date) => !isNaN(d.getTime()))
+            .sort((a: Date, b: Date) => a.getTime() - b.getTime())[0];
+          
+          if (earliestMatch) {
+            const twoHoursAgo = new Date(now.getTime() - 2 * 60 * 60 * 1000);
+            shouldVerify = earliestMatch < twoHoursAgo;
+          }
+        } else {
+          // For single match: check main matchDate
+          const matchDate = slipData.matchDate?.toDate?.() || new Date(slipData.matchDate);
+          const twoHoursAgo = new Date(now.getTime() - 2 * 60 * 60 * 1000);
+          shouldVerify = matchDate < twoHoursAgo;
+        }
+        
+        if (shouldVerify) {
           const result = await this.verifySlip(docSnap.id);
           results.push(result);
 

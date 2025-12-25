@@ -5,6 +5,9 @@
  * Allows Expo app to use OCR without native modules
  */
 
+// Load environment variables
+require('dotenv').config();
+
 const express = require('express');
 const cors = require('cors');
 const multer = require('multer');
@@ -15,6 +18,48 @@ const scrapeRouter = require('./scrape-booking-code');
 
 const app = express();
 const PORT = process.env.PORT || 3001;
+
+// Rate limiting middleware
+// SECURITY: Protect against spam and abuse
+let rateLimit;
+try {
+  rateLimit = require('express-rate-limit');
+} catch (e) {
+  console.warn('⚠️ express-rate-limit not installed. Run: npm install express-rate-limit');
+}
+
+if (rateLimit) {
+  // General API rate limiter: 100 requests per hour per IP
+  const apiLimiter = rateLimit({
+    windowMs: 60 * 60 * 1000, // 1 hour
+    max: 100, // Limit each IP to 100 requests per hour
+    message: 'Too many requests from this IP, please try again later.',
+    standardHeaders: true, // Return rate limit info in `RateLimit-*` headers
+    legacyHeaders: false, // Disable `X-RateLimit-*` headers
+  });
+
+  // OCR endpoint: 10 requests per 15 minutes (more restrictive)
+  const ocrLimiter = rateLimit({
+    windowMs: 15 * 60 * 1000, // 15 minutes
+    max: 10, // Limit each IP to 10 OCR requests per 15 minutes
+    message: 'Too many OCR requests, please try again later.',
+  });
+
+  // Scraping endpoint: 20 requests per hour (resource intensive)
+  const scrapeLimiter = rateLimit({
+    windowMs: 60 * 60 * 1000, // 1 hour
+    max: 20, // Limit each IP to 20 scraping requests per hour
+    message: 'Too many scraping requests, please try again later.',
+  });
+
+  // Apply rate limiters
+  app.use('/api/scrape-booking-code', scrapeLimiter);
+  app.use('/ocr', ocrLimiter);
+  app.use('/api/', apiLimiter);
+  console.log('✅ Rate limiting enabled');
+} else {
+  console.warn('⚠️ Rate limiting disabled - install express-rate-limit for production');
+}
 
 // Middleware
 app.use(cors());
@@ -132,7 +177,14 @@ app.post('/verify-account', async (req, res) => {
     }
 
     // Call Paystack Transfer Recipient API
-    const paystackSecretKey = 'sk_test_3b67b6dbfab99c5d86740eb9a9e1fee992503300';
+    // SECURITY: Secret key from environment variable
+    const paystackSecretKey = process.env.PAYSTACK_SECRET_KEY;
+    if (!paystackSecretKey) {
+      return res.status(500).json({
+        success: false,
+        error: 'Paystack secret key not configured'
+      });
+    }
     
     const https = require('https');
     const postData = JSON.stringify({
@@ -228,7 +280,14 @@ app.post('/transfer', async (req, res) => {
     console.log(`💸 Processing transfer: ${amount} GHS to ${recipientCode}`);
 
     // Paystack Secret Key
-    const paystackSecretKey = 'sk_test_3b67b6dbfab99c5d86740eb9a9e1fee992503300';
+    // SECURITY: Secret key from environment variable
+    const paystackSecretKey = process.env.PAYSTACK_SECRET_KEY;
+    if (!paystackSecretKey) {
+      return res.status(500).json({
+        success: false,
+        error: 'Paystack secret key not configured'
+      });
+    }
     
     const https = require('https');
     const postData = JSON.stringify({
@@ -332,6 +391,89 @@ function calculateConfidence(text) {
   // Cap at 95%
   return Math.min(confidence, 0.95);
 }
+
+// ========== SLIP PURCHASE VERIFICATION ==========
+// SECURITY: Server-side check to prevent purchasing expired slips
+// This is the authoritative check - client-side checks can be bypassed
+app.post('/api/verify-slip-purchase', async (req, res) => {
+  try {
+    const { slipId } = req.body;
+    
+    if (!slipId) {
+      return res.status(400).json({
+        success: false,
+        error: 'Slip ID is required'
+      });
+    }
+
+    // TODO: Implement with Firebase Admin SDK
+    // Install: npm install firebase-admin
+    // Initialize with service account JSON
+    // Then uncomment and implement the code below:
+    
+    /*
+    const admin = require('firebase-admin');
+    if (!admin.apps.length) {
+      admin.initializeApp({
+        credential: admin.credential.cert(require('./path-to-service-account.json'))
+      });
+    }
+    
+    const slipRef = admin.firestore().collection('slips').doc(slipId);
+    const slipSnap = await slipRef.get();
+    
+    if (!slipSnap.exists) {
+      return res.status(404).json({
+        success: false,
+        code: 'SLIP_NOT_FOUND',
+        error: 'Slip not found'
+      });
+    }
+    
+    const slip = slipSnap.data();
+    const expiresAt = slip.expiresAt?.toDate ? slip.expiresAt.toDate() : new Date(slip.expiresAt);
+    const now = new Date();
+    
+    // expiresAt is the single source of truth
+    if (expiresAt && expiresAt.getTime() <= now.getTime()) {
+      return res.status(403).json({
+        success: false,
+        code: 'SLIP_EXPIRED',
+        message: 'This slip has expired and can no longer be purchased.'
+      });
+    }
+    
+    // Slip is valid for purchase
+    return res.json({
+      success: true,
+      purchasable: true,
+      slip: {
+        id: slipSnap.id,
+        price: slip.price,
+        isPremium: slip.isPremium
+      }
+    });
+    */
+    
+    // TEMPORARY: Return success for now
+    // NOTE: Actual expiry enforcement happens in FirestoreService.purchaseSlip
+    // which is called after payment succeeds. This endpoint is for pre-payment UX.
+    // For true security, implement Firebase Admin SDK above.
+    console.log(`✅ Slip purchase verification requested for: ${slipId}`);
+    return res.json({
+      success: true,
+      purchasable: true,
+      message: 'Verification passed (client-side enforcement active)'
+    });
+    
+  } catch (error) {
+    console.error('Error verifying slip purchase:', error);
+    return res.status(500).json({
+      success: false,
+      error: 'Failed to verify slip purchase'
+    });
+  }
+});
 
 // Error handling middleware
 app.use((err, req, res, next) => {

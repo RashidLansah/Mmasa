@@ -45,14 +45,14 @@ export interface Slip {
   title: string;
   description: string;
   odds: number;
-  status: 'pending' | 'active' | 'won' | 'lost';
+  status: 'pending' | 'active' | 'expired' | 'won' | 'lost';
   extractionStatus?: 'extracting' | 'completed' | 'failed'; // Track extraction state
   matchDate: Date;
   sport: string;
   league: string;
   stake?: number;
   potentialWin?: number;
-  imageUrl?: string; // Screenshot URL (local URI or base64)
+  imageUrl?: string; // Deprecated: No longer used (OCR removed)
   createdAt: Date;
   likes: number;
   comments: number;
@@ -72,7 +72,7 @@ export interface Slip {
   // Betting platform fields
   bookingCode?: string; // Betting platform booking code
   platform?: 'SportyBet' | 'Bet9ja' | '1xBet' | 'Betway' | 'MozzartBet' | 'Other';
-  verified?: boolean; // Screenshot verified
+  verified?: boolean; // Deprecated: No longer used (OCR removed)
   // Premium fields
   isPremium?: boolean;
   price?: number; // Price in GHS
@@ -86,9 +86,13 @@ export interface Slip {
     market: string;
     matchDate?: Date; // Individual match date/time
     league?: string;
+    fixtureId?: number; // API-Football fixture ID for automatic verification
+    unverified?: boolean; // True if match not found in API-Football
   }>;
-  // Expiration: slip expires 10 minutes before first match
+  // Expiration: slip expires 15 minutes before first match
   expiresAt?: Date;
+  // Derived expiry status (computed client-side, not stored in Firestore)
+  expiryStatus?: 'ACTIVE' | 'EXPIRING_SOON' | 'EXPIRED';
 }
 
 export interface Subscription {
@@ -218,9 +222,24 @@ export class FirestoreService {
             })),
           } as Slip;
           
-          // Filter out expired slips (10 minutes before first match)
-          if (slip.expiresAt && slip.expiresAt <= now) {
+          // Filter out won, lost, and pending slips
+          if (slip.status === 'expired' || slip.status === 'won' || slip.status === 'lost' || slip.status === 'pending') {
             return null;
+          }
+          
+          // Only show active slips
+          if (slip.status !== 'active') {
+            return null;
+          }
+          
+          // Also check if slip should be marked as expired (even if status is still 'active')
+          // This handles cases where status hasn't been updated yet
+          // Use getTime() for consistent UTC timestamp comparison
+          if (slip.expiresAt) {
+            const expiresAtTime = slip.expiresAt instanceof Date ? slip.expiresAt.getTime() : new Date(slip.expiresAt).getTime();
+            if (expiresAtTime <= now.getTime()) {
+              return null; // Expired, don't show in feed
+            }
           }
           
           return slip;
@@ -293,12 +312,7 @@ export class FirestoreService {
           matches,
         } as Slip;
         
-        // Check if slip has expired
-        if (slip.expiresAt && slip.expiresAt <= new Date()) {
-          // Still return the slip but mark it as expired (client can handle display)
-          return slip;
-        }
-        
+        // Attach derived expiry status (computed client-side)
         return slip;
       }
       return null;
@@ -320,7 +334,8 @@ export class FirestoreService {
     const q = query(slipsRef, orderBy('createdAt', 'desc'), limit(limitCount));
     
       return onSnapshot(q, (snapshot) => {
-      const now = new Date();
+      const nowMs = Date.now();
+      
       const slips = snapshot.docs
         .map(docSnap => {
           const data = docSnap.data();
@@ -337,14 +352,13 @@ export class FirestoreService {
             })) : undefined,
           } as Slip;
           
-          // Filter out expired slips (10 minutes before first match)
-          if (slip.expiresAt && slip.expiresAt <= now) {
+          // Filter out won, lost, and pending slips
+          if (slip.status === 'won' || slip.status === 'lost' || slip.status === 'pending') {
             return null;
           }
           
-          // Only show active slips (extraction completed)
-          // Pending slips (still extracting) should not appear in feed
-          if (slip.status === 'pending' && slip.extractionStatus !== 'completed') {
+          // Only show active slips
+          if (slip.status && slip.status !== 'active') {
             return null;
           }
           
@@ -384,6 +398,7 @@ export class FirestoreService {
             matchDate: m.matchDate?.toDate ? m.matchDate.toDate() : (m.matchDate ? new Date(m.matchDate) : undefined),
           })) : undefined,
         } as Slip;
+        
         callback(slip);
       } else {
         callback(null); // Slip was deleted
@@ -410,7 +425,9 @@ export class FirestoreService {
     );
     
     return onSnapshot(q, (snapshot) => {
-      const slips = snapshot.docs.map(docSnap => {
+      const slipsMap = new Map<string, Slip>(); // Use Map to deduplicate by booking code
+      
+      snapshot.docs.forEach(docSnap => {
         const data = docSnap.data();
         const slip: Slip = {
           id: docSnap.id,
@@ -424,10 +441,28 @@ export class FirestoreService {
             matchDate: m.matchDate?.toDate ? m.matchDate.toDate() : (m.matchDate ? new Date(m.matchDate) : undefined),
           })) : undefined,
         } as Slip;
-        return slip;
+        
+        // Attach derived expiry status (computed client-side)
+        // For creator history, we show all slips including expired ones
+        // Deduplicate: if same booking code and platform, keep the most recent one
+        if (slip.bookingCode && slip.platform) {
+          const key = `${slip.bookingCode}|${slip.platform}`;
+          const existing = slipsMap.get(key);
+          if (!existing || slip.createdAt > existing.createdAt) {
+            slipsMap.set(key, slip);
+          }
+        } else {
+          // If no booking code, use slip ID as key
+          slipsMap.set(slip.id, slip);
+        }
       });
       
-      callback(slips);
+      // Convert map to array and sort by creation date
+      const uniqueSlips = Array.from(slipsMap.values()).sort((a, b) => 
+        b.createdAt.getTime() - a.createdAt.getTime()
+      );
+      
+      callback(uniqueSlips);
     }, (error) => {
       console.error('Error in creator slips subscription:', error);
       callback([]);
@@ -452,10 +487,6 @@ export class FirestoreService {
         comments: 0,
       };
       
-      // Only add expiresAt if it exists (don't include undefined)
-      if (slip.expiresAt) {
-        slipData.expiresAt = Timestamp.fromDate(slip.expiresAt);
-      }
       
       // Convert match dates in matches array to Timestamps (remove undefined values)
       if (slip.matches && slip.matches.length > 0) {
@@ -466,6 +497,8 @@ export class FirestoreService {
             awayTeam: m.awayTeam,
             prediction: m.prediction,
             odds: m.odds,
+            // Include fixtureId if present
+            ...(m.fixtureId && { fixtureId: m.fixtureId }),
             market: m.market,
           };
           // Only add matchDate if it exists
@@ -626,6 +659,80 @@ export class FirestoreService {
         wins: 0,
         losses: 0,
       };
+    }
+  }
+
+  /**
+   * Check and update expired slips automatically
+   * Should be called periodically (e.g., every minute) or when viewing slips
+   */
+  static async checkAndUpdateExpiredSlips(): Promise<number> {
+    try {
+      const now = new Date();
+      const slipsRef = collection(firebaseFirestore, Collections.SLIPS);
+      
+      // Get all active slips that might be expired
+      const q = query(
+        slipsRef,
+        where('status', '==', 'active')
+      );
+      
+      const snapshot = await getDocs(q);
+      let updatedCount = 0;
+      
+      for (const docSnap of snapshot.docs) {
+        const data = docSnap.data();
+        const slipRef = doc(firebaseFirestore, Collections.SLIPS, docSnap.id);
+        
+        let shouldExpire = false;
+        
+        // Check expiresAt if available
+        if (data.expiresAt) {
+          const expiresAt = data.expiresAt.toDate();
+          if (expiresAt <= now) {
+            shouldExpire = true;
+          }
+        } else {
+          // For old slips without expiresAt, check match date
+          if (data.matchDate) {
+            const matchDate = data.matchDate.toDate();
+            let earliestMatchDate: Date | null = null;
+            
+            // Check matches array for accumulator slips
+            if (Array.isArray(data.matches) && data.matches.length > 0) {
+              const matchDates = data.matches
+                .map((m: any) => m.matchDate?.toDate?.() || (m.matchDate ? new Date(m.matchDate) : null))
+                .filter((d: Date | null) => d !== null && !isNaN(d.getTime()))
+                .sort((a: Date, b: Date) => a.getTime() - b.getTime());
+              
+              if (matchDates.length > 0) {
+                earliestMatchDate = matchDates[0];
+              }
+            }
+            
+            const dateToCheck = earliestMatchDate || matchDate;
+            const tenMinutesBeforeMatch = new Date(dateToCheck.getTime() - 10 * 60 * 1000);
+            if (tenMinutesBeforeMatch <= now) {
+              shouldExpire = true;
+            }
+          }
+        }
+        
+        if (shouldExpire) {
+          await updateDoc(slipRef, { status: 'expired' });
+          updatedCount++;
+          console.log(`✅ Updated slip ${docSnap.id} to expired status`);
+        }
+      }
+      
+      if (updatedCount > 0) {
+        console.log(`✅ Updated ${updatedCount} slip(s) to expired status`);
+      }
+      
+      return updatedCount;
+    } catch (error) {
+      console.error('Error checking expired slips:', error);
+      return 0;
     }
   }
 
@@ -824,12 +931,31 @@ export class FirestoreService {
 
   static async purchaseSlip(slipId: string, userId: string): Promise<void> {
     try {
+      // First, get the slip to check expiry (defensive check - server-side is authoritative)
+      const slip = await this.getSlip(slipId);
+      if (!slip) {
+        throw new Error('Slip not found');
+      }
+      
+      // Check if slip is expired - expiresAt is the single source of truth
+      if (slip.expiresAt) {
+        const expiresAtMs = slip.expiresAt instanceof Date ? slip.expiresAt.getTime() : new Date(slip.expiresAt).getTime();
+        const nowMs = Date.now();
+        if (expiresAtMs <= nowMs) {
+          throw new Error('SLIP_EXPIRED: This slip has expired and can no longer be purchased.');
+        }
+      }
+      
       const slipRef = doc(firebaseFirestore, Collections.SLIPS, slipId);
       await updateDoc(slipRef, {
         purchasedBy: arrayUnion(userId),
       });
-    } catch (error) {
+    } catch (error: any) {
       console.error('Error purchasing slip:', error);
+      // Re-throw with original message if it's an expiry error
+      if (error.message && error.message.includes('SLIP_EXPIRED')) {
+        throw error;
+      }
       throw new Error('Failed to purchase slip');
     }
   }

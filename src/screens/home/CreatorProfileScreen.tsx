@@ -57,27 +57,17 @@ export const CreatorProfileScreen: React.FC<CreatorProfileScreenProps> = ({
   }, [creatorId]);
 
   const renderSlipCard = (slip: Slip) => {
-    const isExpired = slip.expiresAt && new Date(slip.expiresAt) <= new Date();
-    
     return (
       <TouchableOpacity
         onPress={() => navigation.navigate('SlipDetails', { slipId: slip.id })}
       >
-        <Card style={[styles.slipCard, isExpired && styles.expiredSlipCard]}>
+        <Card style={styles.slipCard}>
           <View style={styles.slipRow}>
             <View style={styles.slipInfo}>
               <View style={styles.slipTitleRow}>
                 <AppText variant="bodySmall" style={styles.slipTitle}>
                   {slip.title}
                 </AppText>
-                {isExpired && (
-                  <View style={styles.expiredBadge}>
-                    <Ionicons name="time-outline" size={12} color={theme.colors.status.error} />
-                    <AppText variant="caption" color={theme.colors.status.error} style={styles.expiredText}>
-                      Expired
-                    </AppText>
-                  </View>
-                )}
               </View>
               <AppText variant="caption" color={theme.colors.text.secondary}>
                 {slip.sport} • {slip.league}
@@ -90,9 +80,18 @@ export const CreatorProfileScreen: React.FC<CreatorProfileScreenProps> = ({
               <AppText variant="caption" color={theme.colors.text.secondary}>
                 Odds
               </AppText>
-              <AppText variant="bodySmall" style={styles.oddsValue}>
-                {slip.odds?.toFixed(2) || '0.00'}
-              </AppText>
+              {slip.extractionStatus === 'extracting' || !slip.odds ? (
+                <View style={{ flexDirection: 'row', alignItems: 'center', gap: 4 }}>
+                  <Ionicons name="time-outline" size={12} color={theme.colors.text.secondary} />
+                  <AppText variant="bodySmall" style={[styles.oddsValue, { color: theme.colors.text.secondary }]}>
+                    —
+                  </AppText>
+                </View>
+              ) : (
+                <AppText variant="bodySmall" style={styles.oddsValue}>
+                  {slip.odds.toFixed(2)}
+                </AppText>
+              )}
             </View>
             <View style={styles.slipStat}>
               <AppText variant="caption" color={theme.colors.text.secondary}>

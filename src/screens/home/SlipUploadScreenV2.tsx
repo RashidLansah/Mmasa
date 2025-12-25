@@ -1,13 +1,11 @@
 /**
- * Slip Upload Screen V2 - With Screenshot OCR
+ * Slip Upload Screen V2 - Booking Code Entry
  * 
- * Two upload methods:
- * A. Upload Screenshot (Recommended) - OCR extracts data
- * B. Manual Entry - Type in details
+ * Users enter booking code and platform to extract match data
  */
 
 import React, { useState, useEffect, useRef } from 'react';
-import { View, StyleSheet, ScrollView, TextInput, TouchableOpacity, Alert, ActivityIndicator, KeyboardAvoidingView, Platform } from 'react-native';
+import { View, StyleSheet, ScrollView, TextInput, TouchableOpacity, ActivityIndicator, KeyboardAvoidingView, Platform } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { AppScreen } from '../../components/common/AppScreen';
 import { AppText } from '../../components/common/AppText';
@@ -18,6 +16,9 @@ import { FirestoreService } from '../../services/firestore.service';
 import { ParsedSlip } from '../../services/slip-parser.service';
 import { BookingCodeScraper } from '../../services/booking-code-scraper.service';
 import { useAuth } from '../../contexts/AuthContext';
+import { doc, updateDoc } from 'firebase/firestore';
+import { firebaseFirestore } from '../../services/firebase';
+import { showToast, showError, showSuccess } from '../../utils/toast.service';
 
 interface SlipUploadScreenV2Props {
   navigation: any;
@@ -44,6 +45,39 @@ export const SlipUploadScreenV2: React.FC<SlipUploadScreenV2Props> = ({ navigati
   // Removed automatic extraction - now happens on publish
 
   /**
+   * Generate a better slip title based on matches
+   */
+  const generateSlipTitle = (matches: Array<{ homeTeam: string; awayTeam: string; league?: string }>): string => {
+    if (!matches || matches.length === 0) {
+      return 'Betting Slip';
+    }
+
+    if (matches.length === 1) {
+      // Single match: "Team1 vs Team2"
+      return `${matches[0].homeTeam} vs ${matches[0].awayTeam}`;
+    }
+
+    if (matches.length === 2) {
+      // Two matches: "Team1 vs Team2, Team3 vs Team4"
+      const match1 = `${matches[0].homeTeam} vs ${matches[0].awayTeam}`;
+      const match2 = `${matches[1].homeTeam} vs ${matches[1].awayTeam}`;
+      return `${match1}, ${match2}`;
+    }
+
+    if (matches.length === 3) {
+      // Three matches: "Team1 vs Team2, Team3 vs Team4, Team5 vs Team6"
+      const match1 = `${matches[0].homeTeam} vs ${matches[0].awayTeam}`;
+      const match2 = `${matches[1].homeTeam} vs ${matches[1].awayTeam}`;
+      const match3 = `${matches[2].homeTeam} vs ${matches[2].awayTeam}`;
+      return `${match1}, ${match2}, ${match3}`;
+    }
+
+    // More than 3 matches: Use count-based title with first match
+    const firstMatch = `${matches[0].homeTeam} vs ${matches[0].awayTeam}`;
+    return `${firstMatch} + ${matches.length - 1} more`;
+  };
+
+  /**
    * Scrape matches from booking code URL
    */
   const scrapeMatches = async () => {
@@ -61,13 +95,6 @@ export const SlipUploadScreenV2: React.FC<SlipUploadScreenV2Props> = ({ navigati
       );
 
       if (scrapedData.matches && scrapedData.matches.length > 0) {
-        // Calculate expiration: 10 minutes before first match kickoff
-        let expiresAt: Date | undefined;
-        if (scrapedData.earliestMatchDate) {
-          const earliestDate = new Date(scrapedData.earliestMatchDate);
-          expiresAt = new Date(earliestDate.getTime() - 10 * 60 * 1000); // 10 minutes before
-        }
-        
         // Update parsedData with scraped matches
         const updatedParsedData: ParsedSlip = {
           matches: scrapedData.matches.map(m => ({
@@ -84,7 +111,6 @@ export const SlipUploadScreenV2: React.FC<SlipUploadScreenV2Props> = ({ navigati
           stake: scrapedData.stake,
           potentialWin: scrapedData.potentialWin,
           platform: scrapedData.platform,
-          expiresAt,
         };
 
         setParsedData(updatedParsedData);
@@ -105,10 +131,6 @@ export const SlipUploadScreenV2: React.FC<SlipUploadScreenV2Props> = ({ navigati
           updatedParsedData.totalOdds = calculatedOdds;
           setParsedData(updatedParsedData);
           console.log(`📊 Total odds calculated: ${calculatedOdds.toFixed(2)}`);
-        }
-        
-        if (expiresAt) {
-          console.log(`⏰ Slip will expire at: ${expiresAt.toLocaleString()}`);
         }
       } else {
         // Clear parsed data if no matches found
@@ -138,74 +160,160 @@ export const SlipUploadScreenV2: React.FC<SlipUploadScreenV2Props> = ({ navigati
   };
 
   /**
-   * Extract matches from booking code with retries and better error handling
+   * Background function to extract matches and update slip
+   * This runs asynchronously after slip is created
    */
-  const extractMatchesWithRetry = async (retries = 3): Promise<ParsedSlip | null> => {
-    if (!bookingCode.trim() || platform === 'Other') {
-      return null;
-    }
-
-    for (let attempt = 1; attempt <= retries; attempt++) {
-      try {
-        console.log(`🔄 Extraction attempt ${attempt}/${retries} for booking code: ${bookingCode}`);
-        
-        const scrapedData = await BookingCodeScraper.scrapeFromBookingCode(
-          platform,
-          bookingCode.trim()
-        );
-
-        if (scrapedData.matches && scrapedData.matches.length > 0) {
-          console.log(`✅ Successfully extracted ${scrapedData.matches.length} match(es) on attempt ${attempt}`);
+  const extractAndUpdateSlipInBackground = async (slipId: string, bookingCodeParam: string, platformParam: string) => {
+    try {
+      console.log(`🔄 Background extraction started for slip ${slipId}`);
+      
+      // Extract matches with longer timeout and more retries
+      let extractedData: ParsedSlip | null = null;
+      const retries = 5;
+      const timeout = 40000; // 40 seconds
+      
+      for (let attempt = 1; attempt <= retries; attempt++) {
+        try {
+          console.log(`🔄 Background extraction attempt ${attempt}/${retries} for booking code: ${bookingCodeParam}`);
           
-          // Calculate expiration: 10 minutes before first match kickoff
-          let expiresAt: Date | undefined;
-          if (scrapedData.earliestMatchDate) {
-            const earliestDate = new Date(scrapedData.earliestMatchDate);
-            expiresAt = new Date(earliestDate.getTime() - 10 * 60 * 1000); // 10 minutes before
+          const scrapedData = await BookingCodeScraper.scrapeFromBookingCode(
+            platformParam,
+            bookingCodeParam.trim()
+          );
+
+          if (scrapedData.matches && scrapedData.matches.length > 0) {
+            console.log(`✅ Successfully extracted ${scrapedData.matches.length} match(es) on attempt ${attempt}`);
+            
+            extractedData = {
+              matches: scrapedData.matches.map(m => ({
+                homeTeam: m.homeTeam,
+                awayTeam: m.awayTeam,
+                prediction: m.prediction,
+                odds: m.odds,
+                market: m.market,
+                matchDate: m.matchDate ? new Date(m.matchDate) : undefined,
+                league: m.league,
+              })),
+              bookingCode: scrapedData.bookingCode,
+              totalOdds: scrapedData.totalOdds,
+              stake: scrapedData.stake,
+              potentialWin: scrapedData.potentialWin,
+              platform: scrapedData.platform,
+              earliestMatchDate: scrapedData.earliestMatchDate,
+            };
+            
+            break; // Success, exit retry loop
+          } else {
+            console.warn(`⚠️ No matches found on attempt ${attempt}`);
+            if (attempt < retries) {
+              await new Promise(resolve => setTimeout(resolve, 3000 * attempt));
+            }
           }
-          
-          const parsedData: ParsedSlip = {
-            matches: scrapedData.matches.map(m => ({
-              homeTeam: m.homeTeam,
-              awayTeam: m.awayTeam,
-              prediction: m.prediction,
-              odds: m.odds,
-              market: m.market,
-              matchDate: m.matchDate ? new Date(m.matchDate) : undefined,
-              league: m.league,
-            })),
-            bookingCode: scrapedData.bookingCode,
-            totalOdds: scrapedData.totalOdds,
-            stake: scrapedData.stake,
-            potentialWin: scrapedData.potentialWin,
-            platform: scrapedData.platform,
-            expiresAt,
-          };
-          
-          return parsedData;
-        } else {
-          console.warn(`⚠️ No matches found on attempt ${attempt}`);
+        } catch (error: any) {
+          console.error(`❌ Background extraction attempt ${attempt} failed:`, error.message);
           if (attempt < retries) {
-            // Wait before retry (exponential backoff)
-            await new Promise(resolve => setTimeout(resolve, 2000 * attempt));
-            continue;
+            await new Promise(resolve => setTimeout(resolve, 3000 * attempt));
           }
-        }
-      } catch (error: any) {
-        console.error(`❌ Extraction attempt ${attempt} failed:`, error.message);
-        
-        if (attempt < retries) {
-          // Wait before retry (exponential backoff)
-          await new Promise(resolve => setTimeout(resolve, 2000 * attempt));
-          continue;
-        } else {
-          // All retries failed
-          throw error;
         }
       }
+      
+      if (!extractedData || !extractedData.matches || extractedData.matches.length === 0) {
+        console.error('❌ No matches extracted after all retries, marking as failed');
+        const slipRef = doc(firebaseFirestore, 'slips', slipId);
+        await updateDoc(slipRef, { extractionStatus: 'failed' });
+        return;
+      }
+      
+      console.log(`✅ Background extraction complete: ${extractedData.matches.length} matches found`);
+      
+      // Use extracted matches directly - no API matching during parsing
+      // Focus on getting parsed matches, API matching can happen later if needed
+      const extractedMatches = extractedData.matches.map(match => ({
+        ...match,
+        matchDate: match.matchDate ? new Date(match.matchDate) : undefined,
+      }));
+      
+      if (extractedMatches.length === 0) {
+        console.error('❌ No matches extracted, marking slip as failed');
+        const slipRef = doc(firebaseFirestore, 'slips', slipId);
+        await updateDoc(slipRef, { 
+          extractionStatus: 'failed',
+          status: 'pending'
+        });
+        return;
+      }
+      
+      // Use all extracted matches - no filtering
+      const validMatches = extractedMatches;
+      
+      // Generate proper title
+      const title = generateSlipTitle(validMatches);
+      
+      // Get match details
+      const firstMatch = validMatches[0];
+      const homeTeam = firstMatch?.homeTeam || 'TBD';
+      const awayTeam = firstMatch?.awayTeam || 'TBD';
+      
+      // Use extracted data
+      const totalOdds = extractedData.totalOdds || validMatches.reduce((acc, m) => acc * (m.odds || 1.0), 1);
+      const stake = extractedData.stake;
+      const potentialWin = extractedData.potentialWin || (stake ? stake * totalOdds : undefined);
+      
+      // Update slip with extracted data
+      const slipRef = doc(firebaseFirestore, 'slips', slipId);
+      
+      // Build update data, filtering out undefined values
+      const updateData: any = {
+        title,
+        odds: totalOdds,
+        status: 'active',
+        extractionStatus: 'completed',
+        matchDate: extractedData.matches[0]?.matchDate ? new Date(extractedData.matches[0].matchDate) : new Date(Date.now() + 24 * 60 * 60 * 1000),
+        league: extractedData.matches[0]?.league || 'Various',
+        homeTeam,
+        awayTeam,
+        matches: validMatches.map(m => {
+          const matchData: any = {
+            homeTeam: m.homeTeam,
+            awayTeam: m.awayTeam,
+            prediction: m.prediction,
+            odds: m.odds || 1.0,
+            market: m.market || 'h2h',
+          };
+          
+          // Only add optional fields if they exist
+          if (m.league) {
+            matchData.league = m.league;
+          }
+          if (m.matchDate) {
+            matchData.matchDate = new Date(m.matchDate);
+          }
+          
+          return matchData;
+        }),
+      };
+      
+      // Only add optional fields if they exist (don't include undefined)
+      if (stake !== undefined && stake !== null) {
+        updateData.stake = stake;
+      }
+      if (potentialWin !== undefined && potentialWin !== null) {
+        updateData.potentialWin = potentialWin;
+      }
+      
+      // Filter out any undefined values before updating
+      const filteredUpdateData = Object.fromEntries(
+        Object.entries(updateData).filter(([_, value]) => value !== undefined)
+      );
+      
+      await updateDoc(slipRef, filteredUpdateData);
+      console.log(`✅ Slip ${slipId} updated with ${validMatches.length} matches`);
+    } catch (error) {
+      console.error('❌ Background extraction error:', error);
+      // Mark as failed
+      const slipRef = doc(firebaseFirestore, 'slips', slipId);
+      await updateDoc(slipRef, { extractionStatus: 'failed' });
     }
-    
-    return null;
   };
 
   /**
@@ -214,30 +322,25 @@ export const SlipUploadScreenV2: React.FC<SlipUploadScreenV2Props> = ({ navigati
   const handlePublish = async () => {
     // Validation
     if (!bookingCode.trim()) {
-      Alert.alert('Error', 'Please enter the booking code');
-      return;
-    }
-    if (!description.trim()) {
-      Alert.alert('Error', 'Please add your analysis');
+      showError('Please enter the booking code', 'Error');
       return;
     }
     
     if (platform === 'Other') {
-      Alert.alert('Error', 'Please select a betting platform');
+      showError('Please select a betting platform', 'Error');
       return;
     }
     
     // Enhanced auth check with better error message
     if (!user) {
-      Alert.alert('Authentication Error', 'You must be logged in to create a slip. Please log out and log back in.');
+      showError('You must be logged in to create a slip. Please log out and log back in.', 'Authentication Error');
       return;
     }
     
     if (!userProfile) {
-      Alert.alert(
-        'Profile Loading', 
+      showError(
         'Your profile is still loading. Please wait a moment and try again.\n\nIf this persists, please log out and log back in.',
-        [{ text: 'OK' }]
+        'Profile Loading'
       );
       console.error('❌ User profile not loaded:', {
         hasUser: !!user,
@@ -248,35 +351,14 @@ export const SlipUploadScreenV2: React.FC<SlipUploadScreenV2Props> = ({ navigati
     }
 
     setLoading(true);
-    setProcessing(true);
     
     try {
-      // Step 1: Extract matches from booking code (with retries)
-      console.log('📥 Starting match extraction...');
-      const extractedData = await extractMatchesWithRetry(3);
+      // Step 1: Create slip immediately with pending status
+      // Parsing will happen in background
+      console.log('📝 Creating slip with pending status...');
       
-      if (!extractedData || !extractedData.matches || extractedData.matches.length === 0) {
-        Alert.alert(
-          'Extraction Failed',
-          'Could not extract matches from the booking code. Please verify the code is correct and try again.',
-          [{ text: 'OK' }]
-        );
-        setLoading(false);
-        setProcessing(false);
-        return;
-      }
-      
-      console.log(`✅ Extraction complete: ${extractedData.matches.length} matches found`);
-      
-      // Use extracted data
-      const totalOdds = extractedData.totalOdds || 2.0;
-      const stake = extractedData.stake;
-      const potentialWin = extractedData.potentialWin || (stake ? stake * totalOdds : undefined);
-      
-      // Get match details from extracted data (use first match for title)
-      const firstMatch = extractedData.matches[0];
-      const homeTeam = firstMatch?.homeTeam || 'TBD';
-      const awayTeam = firstMatch?.awayTeam || 'TBD';
+      // Generate temporary title
+      const tempTitle = `Betting Slip - ${bookingCode}`;
       
       // Step 2: Create creator profile if needed
       try {
@@ -284,7 +366,6 @@ export const SlipUploadScreenV2: React.FC<SlipUploadScreenV2Props> = ({ navigati
         const isCreator = existingCreators.some(creator => creator.id === user.uid);
         
         if (!isCreator) {
-          // Create creator profile for first-time slip poster
           await FirestoreService.createCreator({
             id: user.uid,
             name: userProfile.displayName,
@@ -298,64 +379,75 @@ export const SlipUploadScreenV2: React.FC<SlipUploadScreenV2Props> = ({ navigati
         }
       } catch (error) {
         console.log('Note: Could not verify/create creator status:', error);
-        // Continue with slip creation even if creator check fails
       }
       
-      // Step 3: Build slip data with extracted matches
+      // Check if slip with same booking code already exists (prevent duplicates)
+      const existingSlips = await FirestoreService.getSlipsByCreator(user.uid);
+      const existingSlip = existingSlips.find(s => 
+        s.bookingCode === bookingCode.trim() && 
+        s.platform === platform &&
+        s.status === 'pending' // Only check pending slips to allow retries
+      );
+      
+      if (existingSlip) {
+        Alert.alert(
+          'Slip Already Exists',
+          'A slip with this booking code is already being processed. Please wait for it to complete.',
+          [{ text: 'OK' }]
+        );
+        setLoading(false);
+        return;
+      }
+      
+      // Step 3: Create slip with pending status
       const slipData: any = {
         creatorId: user.uid,
         creatorName: userProfile.displayName,
         creatorAvatar: userProfile.photoURL || `https://ui-avatars.com/api/?name=${encodeURIComponent(userProfile.displayName)}&background=10B981&color=fff&size=128`,
-        title: `${homeTeam} vs ${awayTeam}`,
+        title: tempTitle,
         description: description.trim(),
-        odds: totalOdds,
-        status: 'active', // Mark as active since extraction is complete
-        extractionStatus: 'completed', // Extraction completed successfully
-        matchDate: extractedData.matches[0]?.matchDate || new Date(Date.now() + 24 * 60 * 60 * 1000),
+        // Don't set odds yet - will be set after parsing
+        status: 'pending', // Will become active after parsing
+        extractionStatus: 'extracting', // Currently extracting
+        matchDate: new Date(Date.now() + 24 * 60 * 60 * 1000), // Temporary, will be updated
         sport: 'Football',
-        league: extractedData.matches[0]?.league || 'Various',
+        league: 'Various',
         bookingCode: bookingCode.trim(),
         platform,
-        verified: false, // No screenshot verification anymore
-        homeTeam,
-        awayTeam,
+        homeTeam: 'TBD',
+        awayTeam: 'TBD',
         resultChecked: false,
         isPremium,
         purchasedBy: [],
-        // Store all extracted matches
-        matches: extractedData.matches,
+        matches: [], // Will be populated after parsing
       };
       
-      // Only add optional fields if they exist (don't include undefined)
-      if (stake) {
-        slipData.stake = stake;
-      }
-      if (potentialWin) {
-        slipData.potentialWin = potentialWin;
-      }
       if (isPremium && price) {
         slipData.price = parseFloat(price);
       }
-      // Only add expiresAt if it exists
-      if (extractedData.expiresAt) {
-        slipData.expiresAt = extractedData.expiresAt;
-      }
       
-      // Step 4: Create slip
-      console.log('💾 Creating slip with extracted data...');
-      await FirestoreService.createSlip(slipData);
-      console.log('✅ Slip created successfully');
+      // Create slip first
+      const slipId = await FirestoreService.createSlip(slipData);
+      console.log('✅ Slip created with pending status, ID:', slipId);
+      
+      // Step 4: Start background parsing (don't await - let it run in background)
+      console.log('🔄 Starting background match extraction...');
+      extractAndUpdateSlipInBackground(slipId, bookingCode, platform).catch(error => {
+        console.error('❌ Background extraction failed:', error);
+        // Update slip status to failed
+        FirestoreService.updateSlipStatus(slipId, 'pending').catch(console.error);
+      });
+      
+      setLoading(false);
 
-      Alert.alert(
-        'Success! 🎉',
-        `Your slip has been published with ${extractedData.matches.length} match(es) extracted successfully.`,
-        [
-          {
-            text: 'OK',
-            onPress: () => navigation.goBack(),
-          },
-        ]
+      showSuccess(
+        'Your slip has been created and is being processed. Matches will be extracted in the background.',
+        'Slip Published! 🎉'
       );
+      // Navigate back after a short delay
+      setTimeout(() => {
+        navigation.goBack();
+      }, 2000);
     } catch (error: any) {
       console.error('Error creating slip:', error);
       
@@ -371,7 +463,7 @@ export const SlipUploadScreenV2: React.FC<SlipUploadScreenV2Props> = ({ navigati
         errorMessage = error.message;
       }
       
-      Alert.alert('Error', errorMessage);
+      showError(errorMessage, 'Error');
     } finally {
       setLoading(false);
       setProcessing(false);
@@ -379,37 +471,37 @@ export const SlipUploadScreenV2: React.FC<SlipUploadScreenV2Props> = ({ navigati
   };
 
   // Main form
-  return (
-    <AppScreen>
-      <KeyboardAvoidingView
-        behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
-        style={{ flex: 1 }}
-      >
+    return (
+      <AppScreen>
+        <KeyboardAvoidingView
+          behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+          style={{ flex: 1 }}
+        >
         <ScrollView>
-          <View style={styles.header}>
+            <View style={styles.header}>
             <TouchableOpacity onPress={() => navigation.goBack()} style={styles.backButton}>
-              <Ionicons name="arrow-back" size={24} color={theme.colors.text.primary} />
-            </TouchableOpacity>
+                <Ionicons name="arrow-back" size={24} color={theme.colors.text.primary} />
+              </TouchableOpacity>
             <AppText variant="h1">Add Slip</AppText>
-            <AppText variant="body" color={theme.colors.text.secondary} style={styles.subtitle}>
+              <AppText variant="body" color={theme.colors.text.secondary} style={styles.subtitle}>
               Enter your booking code and we'll automatically extract match details
-            </AppText>
-          </View>
-
-          <View style={styles.form}>
-            {/* Booking Code */}
-            <View style={styles.formGroup}>
-              <AppText variant="bodySmall" style={styles.label}>
-                Booking Code *
               </AppText>
-              <TextInput
-                style={styles.input}
+            </View>
+
+            <View style={styles.form}>
+              {/* Booking Code */}
+                  <View style={styles.formGroup}>
+                    <AppText variant="bodySmall" style={styles.label}>
+                      Booking Code *
+                    </AppText>
+                    <TextInput
+                      style={styles.input}
                 placeholder="Enter booking code from betting platform"
-                placeholderTextColor={theme.colors.text.secondary}
-                value={bookingCode}
-                onChangeText={setBookingCode}
-                autoCapitalize="characters"
-              />
+                      placeholderTextColor={theme.colors.text.secondary}
+                      value={bookingCode}
+                      onChangeText={setBookingCode}
+                      autoCapitalize="characters"
+                    />
               {processing && (
                 <View style={styles.processingIndicator}>
                   <ActivityIndicator size="small" color={theme.colors.accent.primary} />
@@ -418,55 +510,67 @@ export const SlipUploadScreenV2: React.FC<SlipUploadScreenV2Props> = ({ navigati
                   </AppText>
                 </View>
               )}
-            </View>
+                  </View>
 
-            {/* Platform */}
-            <View style={styles.formGroup}>
-              <AppText variant="bodySmall" style={styles.label}>
+                  {/* Platform */}
+                  <View style={styles.formGroup}>
+                    <AppText variant="bodySmall" style={styles.label}>
                 Platform *
-              </AppText>
-              <ScrollView horizontal showsHorizontalScrollIndicator={false}>
-                <View style={styles.platformOptions}>
-                  {(['SportyBet', 'Bet9ja', '1xBet', 'Betway', 'MozzartBet'] as const).map((p) => (
-                    <TouchableOpacity
-                      key={p}
-                      style={[styles.platformOption, platform === p && styles.platformOptionActive]}
-                      onPress={() => setPlatform(p)}
-                    >
-                      <AppText
-                        variant="bodySmall"
-                        color={platform === p ? theme.colors.accent.primary : theme.colors.text.secondary}
-                      >
-                        {p}
-                      </AppText>
-                    </TouchableOpacity>
-                  ))}
-                </View>
-              </ScrollView>
-            </View>
+                    </AppText>
+                    <ScrollView horizontal showsHorizontalScrollIndicator={false}>
+                      <View style={styles.platformOptions}>
+                        {(['SportyBet', 'Bet9ja', '1xBet', 'Betway', 'MozzartBet'] as const).map((p) => (
+                          <TouchableOpacity
+                            key={p}
+                            style={[styles.platformOption, platform === p && styles.platformOptionActive]}
+                            onPress={() => setPlatform(p)}
+                          >
+                            <AppText
+                              variant="bodySmall"
+                              color={platform === p ? theme.colors.accent.primary : theme.colors.text.secondary}
+                            >
+                              {p}
+                            </AppText>
+                          </TouchableOpacity>
+                        ))}
+                      </View>
+                    </ScrollView>
+                  </View>
 
             {/* Extracted matches preview */}
             {parsedData && parsedData.matches.length > 0 && (
               <Card style={styles.extractedCard}>
                 <AppText variant="h3" style={styles.extractedTitle}>
                   Extracted Matches ✅
-                </AppText>
+                    </AppText>
                 
-                {parsedData.totalOdds && (
+                {parsedData.totalOdds ? (
                   <View style={styles.extractedRow}>
                     <AppText variant="bodySmall" color={theme.colors.text.secondary}>
                       Total Odds:
-                    </AppText>
+                        </AppText>
                     <AppText variant="bodySmall" style={styles.oddsValue}>
                       {parsedData.totalOdds.toFixed(2)}
-                    </AppText>
-                  </View>
-                )}
+                        </AppText>
+                      </View>
+                    ) : (
+                      <View style={styles.extractedRow}>
+                        <AppText variant="bodySmall" color={theme.colors.text.secondary}>
+                          Total Odds:
+                        </AppText>
+                        <View style={{ flexDirection: 'row', alignItems: 'center', gap: 4 }}>
+                          <Ionicons name="time-outline" size={12} color={theme.colors.text.secondary} />
+                          <AppText variant="bodySmall" style={[styles.oddsValue, { color: theme.colors.text.secondary }]}>
+                            —
+                          </AppText>
+                        </View>
+                      </View>
+                    )}
                 
                 <View style={styles.matchesList}>
                   <AppText variant="bodySmall" color={theme.colors.text.secondary} style={styles.matchesTitle}>
                     Selections ({parsedData.matches.length}):
-                  </AppText>
+                    </AppText>
                   {parsedData.matches.map((match, index) => {
                     // Format prediction display
                     const predictionLabel = match.prediction === 'home' ? 'Home' : 
@@ -482,7 +586,7 @@ export const SlipUploadScreenV2: React.FC<SlipUploadScreenV2Props> = ({ navigati
                                       match.market === 'double_chance' ? 'Double Chance' :
                                       match.market.toUpperCase();
                     
-                    return (
+  return (
                       <View key={index} style={styles.matchItem}>
                         {index > 0 && <View style={styles.matchDivider} />}
                         <View style={styles.matchContent}>
@@ -491,20 +595,29 @@ export const SlipUploadScreenV2: React.FC<SlipUploadScreenV2Props> = ({ navigati
                               <Ionicons name="football" size={16} color={theme.colors.text.primary} />
                               <AppText variant="bodySmall" style={styles.predictionLabel}>
                                 {predictionLabel}
-                              </AppText>
-                            </View>
+            </AppText>
+          </View>
                             <AppText variant="bodySmall" style={styles.matchTeams}>
                               {match.homeTeam} vs {match.awayTeam}
-                            </AppText>
+              </AppText>
                             <AppText variant="caption" color={theme.colors.text.secondary} style={styles.marketLabel}>
                               {marketLabel}
+              </AppText>
+            </View>
+                          {match.odds ? (
+                            <AppText variant="bodySmall" color={theme.colors.accent.primary} style={styles.matchOdds}>
+                              {match.odds.toFixed(2)}
                             </AppText>
-                          </View>
-                          <AppText variant="bodySmall" color={theme.colors.accent.primary} style={styles.matchOdds}>
-                            {match.odds.toFixed(2)}
-                          </AppText>
-                        </View>
-                      </View>
+                          ) : (
+                            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 4 }}>
+                              <Ionicons name="time-outline" size={12} color={theme.colors.text.secondary} />
+                              <AppText variant="bodySmall" color={theme.colors.text.secondary} style={styles.matchOdds}>
+                                —
+                              </AppText>
+                            </View>
+                          )}
+                </View>
+            </View>
                     );
                   })}
                 </View>
@@ -594,7 +707,7 @@ export const SlipUploadScreenV2: React.FC<SlipUploadScreenV2Props> = ({ navigati
               title={loading ? 'Publishing...' : 'Publish Slip'}
               onPress={handlePublish}
               variant="primary"
-              disabled={loading || !bookingCode || !description || (isPremium && !price)}
+              disabled={loading || !bookingCode || (isPremium && !price)}
             />
           </View>
         </ScrollView>
@@ -684,13 +797,6 @@ const styles = StyleSheet.create({
   },
   previewSection: {
     marginBottom: theme.spacing.lg,
-  },
-  previewImage: {
-    width: '100%',
-    height: 400,
-    borderRadius: theme.borderRadius.card,
-    resizeMode: 'contain',
-    backgroundColor: theme.colors.background.surface,
   },
   processingOverlay: {
     ...StyleSheet.absoluteFillObject,
@@ -820,18 +926,6 @@ const styles = StyleSheet.create({
   platformOptionActive: {
     borderColor: theme.colors.accent.primary,
     backgroundColor: theme.colors.background.raised,
-  },
-  uploadScreenshotPrompt: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    gap: theme.spacing.sm,
-    padding: theme.spacing.md,
-    backgroundColor: theme.colors.background.raised,
-    borderRadius: theme.borderRadius.card,
-    borderWidth: 1,
-    borderColor: theme.colors.accent.primary,
-    marginBottom: theme.spacing.lg,
   },
   premiumToggle: {
     flexDirection: 'row',

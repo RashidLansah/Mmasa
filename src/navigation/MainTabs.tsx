@@ -1,6 +1,8 @@
 import React from 'react';
 import { createBottomTabNavigator } from '@react-navigation/bottom-tabs';
 import { Ionicons } from '@expo/vector-icons';
+import { BlurView } from 'expo-blur';
+import { Platform, StyleSheet } from 'react-native';
 import { MainTabParamList } from './types';
 import { HomeStack } from './HomeStack';
 import { MySlipsStack } from './MySlipsStack';
@@ -11,22 +13,45 @@ import { theme } from '../design/theme';
 const Tab = createBottomTabNavigator<MainTabParamList>();
 
 export const MainTabs = () => {
+  // iOS glassmorphism tab bar
+  const tabBarStyle = Platform.OS === 'ios' 
+    ? {
+        position: 'absolute' as const,
+        borderTopWidth: 0,
+        paddingBottom: 12,
+        paddingTop: 12,
+        height: 70,
+        elevation: 0,
+        shadowOpacity: 0,
+        backgroundColor: 'transparent',
+      }
+    : {
+        backgroundColor: theme.colors.background.surface,
+        borderTopWidth: 0,
+        paddingBottom: 12,
+        paddingTop: 12,
+        height: 70,
+        elevation: 0,
+        shadowOpacity: 0,
+      };
+
   return (
     <Tab.Navigator
       screenOptions={{
         headerShown: false,
-        tabBarStyle: {
-          backgroundColor: theme.colors.background.surface,
-          borderTopWidth: 0,
-          paddingBottom: 12,
-          paddingTop: 12,
-          height: 70,
-          elevation: 0,
-          shadowOpacity: 0,
-        },
+        tabBarStyle,
         tabBarActiveTintColor: theme.colors.accent.primary,
         tabBarInactiveTintColor: '#FFFFFF',
         tabBarShowLabel: false,
+        tabBarBackground: Platform.OS === 'ios' 
+          ? () => (
+              <BlurView
+                intensity={80}
+                tint="dark"
+                style={StyleSheet.absoluteFill}
+              />
+            )
+          : undefined,
       }}
     >
       <Tab.Screen
